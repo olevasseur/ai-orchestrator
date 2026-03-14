@@ -1,0 +1,1 @@
+Create a file `calculator.py` at the repo root with functions: add(a,b), subtract(a,b), multiply(a,b), divide(a,b). divide should raise ValueError when b==0. Then create `tests/test_calculator.py` with pytest tests covering all four functions and the zero-division edge case.

@@ -1,0 +1,8 @@
+{
+  "objective": "Create calculator.py with four arithmetic functions and tests/test_calculator.py with pytest tests.",
+  "proposed_prompt": "Create a file `calculator.py` at the repo root with functions: add(a,b), subtract(a,b), multiply(a,b), divide(a,b). divide should raise ValueError when b==0. Then create `tests/test_calculator.py` with pytest tests covering all four functions and the zero-division edge case.",
+  "validation_commands": ["pytest tests/test_calculator.py -v"],
+  "risks": "No existing test infrastructure assumed. If pytest is not installed, validation will fail.",
+  "next_step_framing": "After tests pass, consider adding type hints and a CLI wrapper.",
+  "done": false
+}

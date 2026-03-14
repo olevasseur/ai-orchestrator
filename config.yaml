@@ -1,0 +1,37 @@
+# Orchestrator configuration.
+# Secrets (API keys) must go in .env, not here.
+
+# Planner settings
+openai_model: gpt-4o
+
+# Executor settings
+executor_mode: cli            # cli | demo
+claude_cli_path: claude       # path to the `claude` binary
+
+# Storage
+log_dir: ~/.orchestrator/runs
+
+# Timeouts (seconds)
+executor_timeout: 600         # 10 minutes
+validation_timeout: 120       # 2 minutes
+
+# Safety: commands starting with these prefixes are auto-approved
+command_allowlist:
+  - pytest
+  - python
+  - npm
+  - npx
+  - cargo
+  - go test
+  - make
+  - git status
+  - git diff
+  - git log
+  - echo
+
+# Safety: commands containing these strings are always denied
+command_denylist:
+  - "rm -rf /"
+  - sudo
+  - "> /dev/sda"
+  - "dd if="
