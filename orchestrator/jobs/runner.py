@@ -26,6 +26,15 @@ from orchestrator.ui import review as ui
 from orchestrator.utils import git as git_utils
 from orchestrator.utils.config import Config
 from orchestrator.utils.safety import check_command
+from orchestrator.utils.validation import run_validation_command, ValidationResult
+
+# Labels and colours per classification, for terminal display
+_CLASS_STYLE = {
+    "passed":                 ("[green]✓  passed[/green]",              False),
+    "implementation_failure": ("[red]✗  implementation failure[/red]",  True),
+    "missing_tool":           ("[yellow]⚠  missing tool / dependency[/yellow]", True),
+    "timeout":                ("[yellow]⏱  timed out[/yellow]",         True),
+}
 
 
 class OrchestratorRunner:
@@ -53,9 +62,7 @@ class OrchestratorRunner:
             itr_n = run_state.current_iteration
             itr_state = self._load_or_create_iteration(itr_n)
 
-            ui.console.print(
-                f"\n[bold cyan]━━ Iteration {itr_n} ━━[/bold cyan]"
-            )
+            ui.console.print(f"\n[bold cyan]━━ Iteration {itr_n} ━━[/bold cyan]")
 
             # --- Planning ---
             if itr_state.status == Status.QUEUED:
@@ -73,9 +80,7 @@ class OrchestratorRunner:
                 self._save_iteration(itr_state, run_state)
 
                 if plan.get("done"):
-                    ui.console.print(
-                        "[green bold]Planner signals task complete![/green bold]"
-                    )
+                    ui.console.print("[green bold]Planner signals task complete![/green bold]")
                     run_state.status = Status.SUCCEEDED
                     self._save_run_state(run_state)
                     return
@@ -106,9 +111,13 @@ class OrchestratorRunner:
                     return
 
                 self.store.write_approved_prompt(itr_n, approved_prompt)
-                itr_state.proposed_prompt = approved_prompt  # may have been edited
+                itr_state.proposed_prompt = approved_prompt
                 itr_state.status = Status.RUNNING
                 self._save_iteration(itr_state, run_state)
+
+            # --- Pre-execution safety: warn on dirty working tree ---
+            if itr_state.status == Status.RUNNING and not itr_state.executor_exit_code:
+                self._warn_if_dirty(run_state.repo_path)
 
             # --- Execution ---
             if itr_state.status == Status.RUNNING and not itr_state.executor_exit_code:
@@ -128,7 +137,6 @@ class OrchestratorRunner:
                     itr_n, result.stdout, result.stderr, result.exit_code
                 )
 
-                # Git diff
                 diff = git_utils.diff_summary(run_state.repo_path)
                 self.store.write_git_diff(itr_n, diff)
 
@@ -156,14 +164,51 @@ class OrchestratorRunner:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _warn_if_dirty(self, repo_path: str) -> None:
+        """Warn the user if the repo has uncommitted changes before execution."""
+        try:
+            result = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            dirty = result.stdout.strip()
+        except Exception:
+            dirty = ""
+
+        if dirty:
+            ui.console.print(
+                "\n[yellow bold]⚠  Uncommitted changes detected in target repo:[/yellow bold]"
+            )
+            for line in dirty.splitlines()[:10]:
+                ui.console.print(f"  [dim]{line}[/dim]")
+            if len(dirty.splitlines()) > 10:
+                ui.console.print("  [dim]...[/dim]")
+            from rich.prompt import Confirm
+            if not Confirm.ask("Proceed with execution anyway?", default=True):
+                raise RuntimeError("User aborted: uncommitted changes in repo.")
+
     def _call_planner(self, run_state: RunState, itr_n: int) -> dict:
         task = self.store.read_task()
         repo_ctx = git_utils.repo_context(run_state.repo_path)
-        prev_iterations = [
+        raw_prev = [
             self.store.read_iteration_state(n)
             for n in self.store.list_iterations()
             if n < itr_n
         ]
+        # Replace bulky validation_results with a compact summary for the planner
+        prev_iterations = []
+        for itr_raw in raw_prev:
+            summary = dict(itr_raw)
+            if summary.get("validation_results"):
+                summary["validation_summary"] = self._build_validation_summary(
+                    summary.pop("validation_results")
+                )
+            else:
+                summary.pop("validation_results", None)
+            prev_iterations.append(summary)
 
         request_data = {
             "task": task,
@@ -178,8 +223,11 @@ class OrchestratorRunner:
 
     def _run_validation(self, itr_state: IterationState, run_state: RunState) -> None:
         itr_n = itr_state.number
-        val_stdout_lines = []
-        exit_codes = []
+        val_output_lines: list[str] = []
+        exit_codes: list[int] = []
+        val_results: list[dict] = []
+
+        ui.console.print("\n[bold]Validation:[/bold]")
 
         for cmd in itr_state.validation_commands:
             safety = check_command(
@@ -188,39 +236,57 @@ class OrchestratorRunner:
                 self.config.command_denylist,
             )
             if safety == "denied":
-                ui.console.print(f"[red]DENIED command:[/red] {cmd}")
+                ui.console.print(f"  [red]DENIED:[/red] {cmd}")
                 exit_codes.append(-2)
+                val_results.append({"cmd": cmd, "exit_code": -2,
+                                    "classification": "denied", "timed_out": False})
                 continue
             if safety == "needs_confirmation":
                 from rich.prompt import Confirm
-                if not Confirm.ask(f"Run unknown command [yellow]{cmd}[/yellow]?"):
+                if not Confirm.ask(f"  Run unrecognised command [yellow]{cmd}[/yellow]?"):
                     exit_codes.append(-3)
+                    val_results.append({"cmd": cmd, "exit_code": -3,
+                                        "classification": "skipped", "timed_out": False})
                     continue
 
-            ui.console.print(f"[dim]$ {cmd}[/dim]")
-            try:
-                r = subprocess.run(
-                    cmd,
-                    shell=True,
-                    cwd=run_state.repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.validation_timeout,
+            ui.console.print(f"  [dim]$ {cmd}[/dim]")
+            vr = run_validation_command(cmd, run_state.repo_path, self.config.validation_timeout)
+
+            label, show_output = _CLASS_STYLE.get(
+                vr.classification, ("[dim]unknown[/dim]", True)
+            )
+            ui.console.print(f"  {label}")
+
+            if show_output and (vr.stdout.strip() or vr.stderr.strip()):
+                combined = (vr.stdout + vr.stderr).strip()
+                # Show last 20 lines to avoid flooding the terminal
+                lines = combined.splitlines()[-20:]
+                ui.console.print(
+                    "  [dim]" + "\n  ".join(lines) + "[/dim]"
                 )
-                val_stdout_lines.append(f"$ {cmd}\n{r.stdout}")
-                exit_codes.append(r.returncode)
-                if r.returncode == 0:
-                    ui.console.print(f"  [green]✓[/green] {cmd}")
-                else:
-                    ui.console.print(f"  [red]✗[/red] {cmd} (exit {r.returncode})")
-            except subprocess.TimeoutExpired:
-                ui.console.print(f"  [yellow]timed out[/yellow]: {cmd}")
-                exit_codes.append(-1)
+
+            val_output_lines.append(f"$ {cmd}\n{vr.stdout}")
+            exit_codes.append(vr.exit_code)
+            val_results.append(vr.to_dict())
 
         itr_state.validation_exit_codes = exit_codes
-        self.store.write_validation_output(
-            itr_n, "\n".join(val_stdout_lines), ""
-        )
+        itr_state.validation_results = val_results
+        self.store.write_validation_output(itr_n, "\n".join(val_output_lines), "")
+
+    def _build_validation_summary(self, val_results: list[dict]) -> list[dict]:
+        """
+        Produce a compact structured summary for the planner.
+        Keeps cmd + classification + exit_code; omits bulky stdout/stderr.
+        """
+        return [
+            {
+                "cmd": r.get("cmd", ""),
+                "classification": r.get("classification", ""),
+                "exit_code": r.get("exit_code"),
+                "timed_out": r.get("timed_out", False),
+            }
+            for r in val_results
+        ]
 
     def _load_run_state(self) -> RunState:
         d = self.store.read_state()

@@ -19,6 +19,7 @@ validation_timeout: 120       # 2 minutes
 command_allowlist:
   - pytest
   - python
+  - python3
   - npm
   - npx
   - cargo
@@ -28,6 +29,10 @@ command_allowlist:
   - git diff
   - git log
   - echo
+  - test        # shell builtin: test "$(cmd)" = "expected"
+  - "["         # shell builtin: [ "$x" = "y" ]
+  - sh
+  - bash
 
 # Safety: commands containing these strings are always denied
 command_denylist:

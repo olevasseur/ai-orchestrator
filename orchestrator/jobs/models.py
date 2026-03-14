@@ -39,6 +39,8 @@ class IterationState:
     # Executor outputs
     executor_exit_code: Optional[int] = None
     validation_exit_codes: list[int] = field(default_factory=list)
+    # Per-command validation detail: [{cmd, exit_code, classification, timed_out}, ...]
+    validation_results: list[dict] = field(default_factory=list)
 
     # Human decision
     human_decision: str = ""  # approved | edited | rejected | stopped
