@@ -31,8 +31,8 @@ from orchestrator.utils.validation import run_validation_command, ValidationResu
 # Labels and colours per classification, for terminal display
 _CLASS_STYLE = {
     "passed":                 ("[green]✓  passed[/green]",              False),
-    "implementation_failure": ("[red]✗  implementation failure[/red]",  True),
-    "missing_tool":           ("[yellow]⚠  missing tool / dependency[/yellow]", True),
+    "implementation_failure": ("[red]✗  implementation failure[/red] [dim](fix code)[/dim]",  True),
+    "missing_tool":           ("[yellow]⚠  environment / dependency issue[/yellow] [dim](missing tool or module — fix env setup, not code)[/dim]", True),
     "timeout":                ("[yellow]⏱  timed out[/yellow]",         True),
 }
 
