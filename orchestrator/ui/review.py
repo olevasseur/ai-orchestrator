@@ -77,17 +77,17 @@ def run_review(
         console.print("\n")
         choice = Prompt.ask(
             "[bold]Review[/bold]",
-            choices=["a", "e", "q", "s"],
-            default="a",
+            choices=["approve", "edit", "question", "stop"],
+            default="approve",
             show_choices=True,
             show_default=True,
         ).lower()
 
-        if choice == "a":
+        if choice == "approve":
             console.print("[green]Approved.[/green]")
             return {"decision": "approved", "prompt": proposed}
 
-        elif choice == "e":
+        elif choice == "edit":
             console.print(
                 "[dim]Opening editor... paste your edited prompt below.\n"
                 "End with a line containing only '---END---'[/dim]"
@@ -105,13 +105,13 @@ def run_review(
             console.print("[green]Prompt updated.[/green]")
             show_plan({**plan, "proposed_prompt": proposed}, iteration)
 
-        elif choice == "q":
+        elif choice == "question":
             question = Prompt.ask("Your question to the planner")
             console.print("[dim]Asking planner...[/dim]")
             answer = ask_planner(question)
             console.print(Panel(answer, title="Planner answer", border_style="cyan"))
 
-        elif choice == "s":
+        elif choice == "stop":
             console.print("[red]Run stopped by user.[/red]")
             return {"decision": "stopped", "prompt": proposed}
 
