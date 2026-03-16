@@ -162,7 +162,7 @@ class OrchestratorRunner:
             ui.show_memory_saturation(sat)
 
             # --- Auto-refresh if threshold reached ---
-            self._maybe_refresh_memory(run_state, itr_state.number)
+            self._maybe_refresh_memory(run_state, itr_state.number, sat)
 
             # --- Advance ---
             itr_state.status = Status.SUCCEEDED
@@ -219,6 +219,10 @@ class OrchestratorRunner:
                 )
             else:
                 summary.pop("validation_results", None)
+            # Truncate proposed_prompt — planner doesn't need to re-read its own output;
+            # working_memory already summarises what happened each iteration.
+            if len(summary.get("proposed_prompt", "")) > 300:
+                summary["proposed_prompt"] = summary["proposed_prompt"][:300] + "… [truncated]"
             recent_iterations.append(summary)
 
         project_memory = self.memory.load_project_memory()
@@ -308,9 +312,8 @@ class OrchestratorRunner:
             for r in val_results
         ]
 
-    def _maybe_refresh_memory(self, run_state: RunState, itr_n: int) -> None:
+    def _maybe_refresh_memory(self, run_state: RunState, itr_n: int, sat: dict) -> None:
         """Auto-refresh memory if saturation or interval threshold is hit."""
-        sat = self.memory.saturation_status()
         interval = getattr(self.config, "memory_refresh_interval", 5)
         should_refresh = (
             sat["recommendation"] == "refresh now"
@@ -322,9 +325,14 @@ class OrchestratorRunner:
         if not self.config.openai_api_key or self.config.openai_api_key == "demo":
             ui.console.print("[dim]Memory refresh skipped (no API key).[/dim]")
             return
+        before_chars = sat["char_count"]
         ui.console.print("[dim]Auto-refreshing memory...[/dim]")
         snapshot = self.memory.refresh(self.planner.compress_memory)
-        ui.console.print(f"[dim]Memory archived → {snapshot.name}[/dim]")
+        after_chars = len(self.memory.load_working_memory())
+        ui.console.print(
+            f"[dim]Memory archived → {snapshot.name} "
+            f"({before_chars} → {after_chars} chars)[/dim]"
+        )
 
     def _load_run_state(self) -> RunState:
         d = self.store.read_state()

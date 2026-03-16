@@ -257,13 +257,25 @@ def memory_status(
     rec = sat["recommendation"]
     colour = {"healthy": "green", "monitor": "yellow",
               "refresh soon": "yellow", "refresh now": "red"}.get(rec, "white")
+    _hints = {
+        "healthy":      "",
+        "monitor":      " (growing — keep an eye on it)",
+        "refresh soon": " — consider: orchestrator memory refresh --repo .",
+        "refresh now":  " — run: orchestrator memory refresh --repo .",
+    }
+    hint = _hints.get(rec, "")
+    stale_label = (
+        "yes (consecutive Next: lines look repetitive — refresh recommended)"
+        if sat["stale_items_detected"]
+        else "no"
+    )
 
     console.print(f"\n[bold]Memory status:[/bold] {mem.root}")
     console.print(f"  Char count        : {sat['char_count']}")
     console.print(f"  Iterations stored : {sat['iterations_in_memory']}")
     console.print(f"  Open questions    : {sat['open_questions']}")
-    console.print(f"  Stale items       : {sat['stale_items_detected']}")
-    console.print(f"  Recommendation    : [{colour}]{rec}[/{colour}]")
+    console.print(f"  Stale detection   : {stale_label}")
+    console.print(f"  Recommendation    : [{colour}]{rec}[/{colour}]{hint}")
 
     snapshots = mem.list_snapshots()
     if snapshots:

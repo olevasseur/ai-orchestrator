@@ -108,6 +108,9 @@ class MemoryManager:
         val_line = _summarise_validation(itr_state)
         open_qs = _extract_open_questions(itr_state)
 
+        open_q_section = (
+            f"**Open questions:**\n{open_qs}\n\n" if open_qs != "- None" else ""
+        )
         block = (
             f"## Iteration {itr_state.number} · {ts}\n\n"
             f"**Progress:** {itr_state.objective or '(no objective recorded)'}\n\n"
@@ -115,8 +118,8 @@ class MemoryManager:
             f" — executor exit {itr_state.executor_exit_code}."
             f"{(' ' + val_line) if val_line else ''}\n\n"
             f"**Assumptions:** {itr_state.risks or 'None recorded.'}\n\n"
-            f"**Open questions:**\n{open_qs}\n\n"
-            f"**Next:** {itr_state.next_step_framing or 'See next planner output.'}\n\n"
+            + open_q_section
+            + f"**Next:** {itr_state.next_step_framing or 'See next planner output.'}\n\n"
             f"---\n\n"
         )
         current = self.load_working_memory()

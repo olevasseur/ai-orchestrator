@@ -118,7 +118,7 @@ class TestUpdateWorkingMemory:
         content = mem.load_working_memory()
         assert "Missing tool" in content or "missing" in content.lower()
 
-    def test_open_questions_none_when_all_passed(self, mem):
+    def test_open_questions_omitted_when_all_passed(self, mem):
         itr = _make_itr(
             number=0,
             validation_results=[
@@ -127,7 +127,9 @@ class TestUpdateWorkingMemory:
         )
         mem.update_working_memory(itr)
         content = mem.load_working_memory()
-        assert "- None" in content
+        # When no failures, the Open questions section is omitted entirely to reduce bloat
+        assert "Open questions" not in content
+        assert "- None" not in content
 
 
 # ---------------------------------------------------------------------------
