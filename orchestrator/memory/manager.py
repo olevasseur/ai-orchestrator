@@ -3,15 +3,15 @@ Context memory layer for the orchestrator.
 
 Three files live in <repo>/.orchestrator/:
   project_memory.md     — stable facts, architecture, constraints
-                          (human-maintained; updated by LLM only on refresh)
+                          (human-maintained; NEVER overwritten by refresh)
   working_memory.md     — rolling per-iteration context (auto-updated, no LLM)
   memory_snapshots/     — archived working_memory on each refresh
 
 Per-iteration updates are deterministic: built from IterationState fields,
 appended as a markdown block. No LLM call in the hot path.
 
-Compression (refresh) makes exactly one LLM call, triggered either manually
-or automatically at a configurable iteration threshold.
+Compression (refresh) makes exactly one LLM call on working_memory only.
+project_memory.md is read as context for the compressor but never overwritten.
 """
 
 from __future__ import annotations
@@ -133,6 +133,7 @@ class MemoryManager:
         """Compute saturation metrics from working_memory.md contents."""
         working = self.load_working_memory()
         char_count = len(working)
+        project_char_count = len(self.load_project_memory())
 
         # Count iteration blocks
         iterations_in_memory = working.count("\n## Iteration ")
@@ -167,6 +168,7 @@ class MemoryManager:
 
         return {
             "char_count": char_count,
+            "project_char_count": project_char_count,
             "iterations_in_memory": iterations_in_memory,
             "open_questions": open_q_count,
             "stale_items_detected": stale,
@@ -179,12 +181,15 @@ class MemoryManager:
 
     def refresh(
         self,
-        compress_fn: Callable[[str, str], tuple[str, str]],
+        compress_fn: Callable[[str, str], str],
     ) -> Path:
         """
         Archive working_memory.md, compress via LLM, replace in place.
 
-        compress_fn: (working_memory, project_memory) -> (new_working, new_project)
+        project_memory.md is passed to compress_fn as read-only context but
+        is never overwritten — it remains human-maintained.
+
+        compress_fn: (working_memory, project_memory) -> new_working_memory
         Returns the path of the created snapshot file.
         """
         current_working = self.load_working_memory()
@@ -199,10 +204,9 @@ class MemoryManager:
             f"## Project Memory (at time of snapshot)\n\n{current_project}\n"
         )
 
-        # Compress
-        new_working, new_project = compress_fn(current_working, current_project)
+        # Compress working memory only; project memory is not touched
+        new_working = compress_fn(current_working, current_project)
         self.working_memory_path.write_text(new_working)
-        self.project_memory_path.write_text(new_project)
 
         return snapshot_path
 

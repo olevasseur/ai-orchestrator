@@ -142,6 +142,8 @@ class TestSaturationStatus:
         assert sat["recommendation"] == "healthy"
         assert sat["iterations_in_memory"] == 0
         assert sat["open_questions"] == 0
+        assert "project_char_count" in sat
+        assert sat["project_char_count"] > 0  # template is non-empty
 
     def test_threshold_monitor(self, mem):
         for i in range(3):
@@ -201,8 +203,8 @@ class TestSaturationStatus:
 # ---------------------------------------------------------------------------
 
 class TestRefresh:
-    def _fake_compress(self, working: str, project: str) -> tuple[str, str]:
-        return "# Compressed\n\nFresh summary.", "# Project\n\nUpdated facts."
+    def _fake_compress(self, working: str, project: str) -> str:
+        return "# Compressed\n\nFresh summary."
 
     def test_refresh_creates_snapshot(self, mem):
         mem.update_working_memory(_make_itr(number=0))
@@ -221,10 +223,12 @@ class TestRefresh:
         mem.refresh(self._fake_compress)
         assert mem.load_working_memory() == "# Compressed\n\nFresh summary."
 
-    def test_project_memory_updated_on_refresh(self, mem):
+    def test_project_memory_not_modified_on_refresh(self, mem):
+        original_project = mem.load_project_memory()
         mem.update_working_memory(_make_itr(number=0))
         mem.refresh(self._fake_compress)
-        assert mem.load_project_memory() == "# Project\n\nUpdated facts."
+        # project_memory must remain exactly as it was — never overwritten by refresh
+        assert mem.load_project_memory() == original_project
 
     def test_multiple_refreshes_accumulate_snapshots(self, mem):
         for i in range(3):

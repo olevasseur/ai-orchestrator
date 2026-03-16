@@ -54,19 +54,20 @@ Rules:
 - If a previous validation showed missing_tool, address environment setup first.
 """
 
-_COMPRESS_SYSTEM = """You are compressing an orchestrator's memory log into a
-concise handoff document.
+_COMPRESS_SYSTEM = """You are compressing an orchestrator's working memory log.
 
-Given the current working_memory.md and project_memory.md, produce fresh
-compressed versions. Rules:
-- working_memory: max 1500 characters. Keep: open questions, key decisions,
-  latest progress, what matters next. Drop: resolved items, redundant entries.
-- project_memory: update with any newly confirmed stable facts from the working
-  memory. Keep concise (<1000 chars). Do not invent facts.
+You will receive the current working_memory.md and project_memory.md.
+project_memory.md is stable reference material — do not modify it.
+Your job is to compress working_memory.md only.
 
-Respond with a JSON object with exactly two keys:
+Rules for the compressed working memory:
+- Max 1500 characters.
+- Keep: open questions, key decisions, latest progress, what matters next.
+- Drop: resolved items, redundant entries, superseded assumptions.
+- Do not copy content that is already covered in project_memory.md.
+
+Respond with a JSON object with exactly one key:
   "working_memory": "... full markdown content ..."
-  "project_memory": "... full markdown content ..."
 """
 
 
@@ -133,10 +134,12 @@ class OpenAIPlanner:
 
     def compress_memory(
         self, working_memory: str, project_memory: str
-    ) -> tuple[str, str]:
+    ) -> str:
         """
-        Compress working_memory + project_memory into fresh concise versions.
-        Returns (new_working_memory, new_project_memory).
+        Compress working_memory into a fresh concise version.
+        project_memory is passed as read-only context so the compressor knows
+        what stable facts are already captured there.
+        Returns new_working_memory only. project_memory is never modified.
         Called only on memory refresh — not in the per-iteration hot path.
         """
         messages = [
@@ -145,7 +148,7 @@ class OpenAIPlanner:
                 "role": "user",
                 "content": (
                     f"## Working Memory\n{working_memory}\n\n"
-                    f"## Project Memory\n{project_memory}"
+                    f"## Project Memory (context only — do not modify)\n{project_memory}"
                 ),
             },
         ]
@@ -156,7 +159,4 @@ class OpenAIPlanner:
             temperature=0.2,
         )
         data = json.loads(response.choices[0].message.content or "{}")
-        return (
-            data.get("working_memory", working_memory),
-            data.get("project_memory", project_memory),
-        )
+        return data.get("working_memory", working_memory)

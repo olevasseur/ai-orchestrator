@@ -269,13 +269,17 @@ def memory_status(
         if sat["stale_items_detected"]
         else "no"
     )
+    working_chars = sat["char_count"]
+    project_chars = sat["project_char_count"]
+    total_chars = working_chars + project_chars
 
     console.print(f"\n[bold]Memory status:[/bold] {mem.root}")
-    console.print(f"  Char count        : {sat['char_count']}")
-    console.print(f"  Iterations stored : {sat['iterations_in_memory']}")
+    console.print(f"  Project memory    : {project_chars} chars  [dim](stable — not compressed by refresh)[/dim]")
+    console.print(f"  Working memory    : {working_chars} chars · {sat['iterations_in_memory']} iteration(s)")
+    console.print(f"  Total payload     : ~{total_chars} chars  [dim](sent to planner each iteration)[/dim]")
     console.print(f"  Open questions    : {sat['open_questions']}")
     console.print(f"  Stale detection   : {stale_label}")
-    console.print(f"  Recommendation    : [{colour}]{rec}[/{colour}]{hint}")
+    console.print(f"  Recommendation    : [{colour}]{rec}[/{colour}]{hint}  [dim](based on working memory)[/dim]")
 
     snapshots = mem.list_snapshots()
     if snapshots:
