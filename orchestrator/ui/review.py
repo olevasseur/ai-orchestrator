@@ -137,6 +137,24 @@ def show_execution_result(result, iteration: int) -> None:
         )
 
 
+def show_memory_saturation(status: dict) -> None:
+    """Render a one-line memory health indicator after each iteration."""
+    rec = status["recommendation"]
+    colour = {
+        "healthy":      "green",
+        "monitor":      "yellow",
+        "refresh soon": "yellow",
+        "refresh now":  "red",
+    }.get(rec, "white")
+    stale = "  [dim]stale items detected[/dim]" if status.get("stale_items_detected") else ""
+    console.print(
+        f"[dim]Memory:[/dim] {status['char_count']} chars · "
+        f"{status['iterations_in_memory']} iter · "
+        f"{status['open_questions']} open questions · "
+        f"[{colour}]{rec}[/{colour}]{stale}"
+    )
+
+
 def show_status(run_state: dict, iterations: list[dict]) -> None:
     """Show a summary table of the current run."""
     console.print(Rule("[bold cyan]Orchestrator Status[/bold cyan]"))

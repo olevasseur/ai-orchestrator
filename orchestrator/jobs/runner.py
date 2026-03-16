@@ -20,6 +20,7 @@ from pathlib import Path
 
 from orchestrator.executor.base import BaseExecutor
 from orchestrator.jobs.models import IterationState, RunState, Status
+from orchestrator.memory.manager import MemoryManager
 from orchestrator.planner.openai_planner import OpenAIPlanner
 from orchestrator.storage.store import RunStore
 from orchestrator.ui import review as ui
@@ -55,8 +56,12 @@ class OrchestratorRunner:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Main loop: plan → review → execute → validate → repeat."""
+        """Main loop: plan → review → execute → validate → update memory → repeat."""
         run_state = self._load_run_state()
+
+        # Memory lives in <target-repo>/.orchestrator/
+        self.memory = MemoryManager(run_state.repo_path)
+        self.memory.init()
 
         while True:
             itr_n = run_state.current_iteration
@@ -151,6 +156,14 @@ class OrchestratorRunner:
             # --- Validation ---
             self._run_validation(itr_state, run_state)
 
+            # --- Memory update (deterministic, no LLM) ---
+            self.memory.update_working_memory(itr_state)
+            sat = self.memory.saturation_status()
+            ui.show_memory_saturation(sat)
+
+            # --- Auto-refresh if threshold reached ---
+            self._maybe_refresh_memory(run_state, itr_state.number)
+
             # --- Advance ---
             itr_state.status = Status.SUCCEEDED
             itr_state.finished_at = datetime.utcnow().isoformat()
@@ -193,14 +206,12 @@ class OrchestratorRunner:
     def _call_planner(self, run_state: RunState, itr_n: int) -> dict:
         task = self.store.read_task()
         repo_ctx = git_utils.repo_context(run_state.repo_path)
-        raw_prev = [
-            self.store.read_iteration_state(n)
-            for n in self.store.list_iterations()
-            if n < itr_n
-        ]
-        # Replace bulky validation_results with a compact summary for the planner
-        prev_iterations = []
-        for itr_raw in raw_prev:
+
+        # Last 3 iterations only — older context lives in working_memory.md
+        all_prev_ns = [n for n in self.store.list_iterations() if n < itr_n]
+        recent_raw = [self.store.read_iteration_state(n) for n in all_prev_ns[-3:]]
+        recent_iterations = []
+        for itr_raw in recent_raw:
             summary = dict(itr_raw)
             if summary.get("validation_results"):
                 summary["validation_summary"] = self._build_validation_summary(
@@ -208,16 +219,25 @@ class OrchestratorRunner:
                 )
             else:
                 summary.pop("validation_results", None)
-            prev_iterations.append(summary)
+            recent_iterations.append(summary)
+
+        project_memory = self.memory.load_project_memory()
+        working_memory = self.memory.load_working_memory()
 
         request_data = {
             "task": task,
+            "project_memory": project_memory,
+            "working_memory": working_memory,
             "repo_context": repo_ctx,
-            "previous_iterations": prev_iterations,
+            "recent_iterations": recent_iterations,
         }
         self.store.write_planner_request(itr_n, request_data)
 
-        plan = self.planner.plan(task, repo_ctx, prev_iterations)
+        plan = self.planner.plan(
+            task, repo_ctx, recent_iterations,
+            project_memory=project_memory,
+            working_memory=working_memory,
+        )
         self.store.write_planner_response(itr_n, plan)
         return plan
 
@@ -287,6 +307,24 @@ class OrchestratorRunner:
             }
             for r in val_results
         ]
+
+    def _maybe_refresh_memory(self, run_state: RunState, itr_n: int) -> None:
+        """Auto-refresh memory if saturation or interval threshold is hit."""
+        sat = self.memory.saturation_status()
+        interval = getattr(self.config, "memory_refresh_interval", 5)
+        should_refresh = (
+            sat["recommendation"] == "refresh now"
+            or ((itr_n + 1) % interval == 0)
+        )
+        if not should_refresh:
+            return
+        # Skip if no real API key (demo mode)
+        if not self.config.openai_api_key or self.config.openai_api_key == "demo":
+            ui.console.print("[dim]Memory refresh skipped (no API key).[/dim]")
+            return
+        ui.console.print("[dim]Auto-refreshing memory...[/dim]")
+        snapshot = self.memory.refresh(self.planner.compress_memory)
+        ui.console.print(f"[dim]Memory archived → {snapshot.name}[/dim]")
 
     def _load_run_state(self) -> RunState:
         d = self.store.read_state()

@@ -1,5 +1,5 @@
 """
-OpenAI planner: takes task + repo context + previous iteration results and
+OpenAI planner: takes task + repo context + memory + recent iterations and
 returns a structured plan for the next implementation increment.
 
 The planner always returns a JSON object with these keys:
@@ -25,6 +25,16 @@ in a human-in-the-loop coding orchestrator. Your job is to break a large task
 into small, safe, reviewable increments and produce a precise implementation
 prompt for Claude Code to execute.
 
+You will receive:
+- The original task
+- Stable project memory (architecture facts, constraints)
+- Rolling working memory (recent progress, open questions, decisions)
+- The last few iteration summaries (recent history only)
+- Current repo context
+
+Use the memory to maintain continuity across iterations without being given
+the full history. Trust working memory as an accurate summary of prior work.
+
 Always respond with a single JSON object — no markdown fences, no prose outside
 the JSON — with exactly these keys:
 {
@@ -41,6 +51,22 @@ Rules:
 - The proposed_prompt must be self-contained: include all necessary context.
 - validation_commands should be runnable shell commands (pytest, etc.).
 - Set done=true only when the whole task is complete and verified.
+- If a previous validation showed missing_tool, address environment setup first.
+"""
+
+_COMPRESS_SYSTEM = """You are compressing an orchestrator's memory log into a
+concise handoff document.
+
+Given the current working_memory.md and project_memory.md, produce fresh
+compressed versions. Rules:
+- working_memory: max 1500 characters. Keep: open questions, key decisions,
+  latest progress, what matters next. Drop: resolved items, redundant entries.
+- project_memory: update with any newly confirmed stable facts from the working
+  memory. Keep concise (<1000 chars). Do not invent facts.
+
+Respond with a JSON object with exactly two keys:
+  "working_memory": "... full markdown content ..."
+  "project_memory": "... full markdown content ..."
 """
 
 
@@ -53,16 +79,23 @@ class OpenAIPlanner:
         self,
         task: str,
         repo_context: str,
-        previous_iterations: list[dict[str, Any]],
+        recent_iterations: list[dict[str, Any]],
+        *,
+        project_memory: str = "",
+        working_memory: str = "",
     ) -> dict[str, Any]:
         """Call the planner and return parsed JSON."""
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Build user message
-        user_parts = [f"## Task\n{task}", f"## Repo context\n{repo_context}"]
-        if previous_iterations:
-            itr_text = json.dumps(previous_iterations, indent=2)
-            user_parts.append(f"## Previous iterations\n{itr_text}")
+        user_parts = [f"## Task\n{task}"]
+        if project_memory.strip():
+            user_parts.append(f"## Project memory\n{project_memory}")
+        if working_memory.strip():
+            user_parts.append(f"## Working memory\n{working_memory}")
+        user_parts.append(f"## Repo context\n{repo_context}")
+        if recent_iterations:
+            itr_text = json.dumps(recent_iterations, indent=2)
+            user_parts.append(f"## Recent iterations (last {len(recent_iterations)})\n{itr_text}")
 
         messages.append({"role": "user", "content": "\n\n".join(user_parts)})
 
@@ -76,7 +109,6 @@ class OpenAIPlanner:
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
 
-        # Normalise
         data.setdefault("objective", "")
         data.setdefault("proposed_prompt", "")
         data.setdefault("validation_commands", [])
@@ -90,10 +122,7 @@ class OpenAIPlanner:
         """Ad-hoc follow-up question to the planner (during review step)."""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"## Context\n{context}\n\n## Question\n{question}",
-            },
+            {"role": "user", "content": f"## Context\n{context}\n\n## Question\n{question}"},
         ]
         response = self.client.chat.completions.create(
             model=self.model,
@@ -101,3 +130,33 @@ class OpenAIPlanner:
             temperature=0.3,
         )
         return response.choices[0].message.content or ""
+
+    def compress_memory(
+        self, working_memory: str, project_memory: str
+    ) -> tuple[str, str]:
+        """
+        Compress working_memory + project_memory into fresh concise versions.
+        Returns (new_working_memory, new_project_memory).
+        Called only on memory refresh — not in the per-iteration hot path.
+        """
+        messages = [
+            {"role": "system", "content": _COMPRESS_SYSTEM},
+            {
+                "role": "user",
+                "content": (
+                    f"## Working Memory\n{working_memory}\n\n"
+                    f"## Project Memory\n{project_memory}"
+                ),
+            },
+        ]
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        data = json.loads(response.choices[0].message.content or "{}")
+        return (
+            data.get("working_memory", working_memory),
+            data.get("project_memory", project_memory),
+        )

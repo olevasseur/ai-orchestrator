@@ -38,6 +38,9 @@ class Config:
     executor_timeout: int = 600         # 10 minutes
     validation_timeout: int = 120       # 2 minutes
 
+    # Memory
+    memory_refresh_interval: int = 5   # auto-refresh every N completed iterations
+
     # Safety
     command_allowlist: list[str] = field(default_factory=lambda: [
         "pytest", "python", "npm", "npx", "cargo", "go", "make",

@@ -15,6 +15,9 @@ log_dir: ~/.orchestrator/runs
 executor_timeout: 600         # 10 minutes
 validation_timeout: 120       # 2 minutes
 
+# Memory
+memory_refresh_interval: 5    # auto-refresh working_memory every N iterations
+
 # Safety: commands starting with these prefixes are auto-approved
 command_allowlist:
   - pytest

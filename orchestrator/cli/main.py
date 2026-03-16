@@ -6,6 +6,9 @@ Commands:
   orchestrator review
   orchestrator status
   orchestrator resume
+  orchestrator memory init    --repo PATH
+  orchestrator memory status  --repo PATH
+  orchestrator memory refresh --repo PATH
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from rich.console import Console
 from orchestrator.executor.cli_executor import make_executor
 from orchestrator.jobs.models import RunState, Status
 from orchestrator.jobs.runner import OrchestratorRunner
+from orchestrator.memory.manager import MemoryManager
 from orchestrator.planner.openai_planner import OpenAIPlanner
 from orchestrator.storage.store import RunStore
 from orchestrator.ui import review as ui
@@ -28,8 +32,8 @@ app = typer.Typer(help="Human-in-the-loop coding orchestrator.", no_args_is_help
 console = Console()
 
 
-def _load_config() -> Config:
-    return Config.load()
+def _load_config(config_file: Optional[Path] = None) -> Config:
+    return Config.load(config_file)
 
 
 def _make_planner(cfg: Config) -> OpenAIPlanner:
@@ -56,7 +60,6 @@ def start(
     """Start a new orchestration run."""
     cfg = Config.load(config_file)
 
-    # Resolve task text
     if task_file:
         task_text = task_file.read_text()
     elif task:
@@ -65,16 +68,15 @@ def start(
         console.print("[red]Provide --task or --task-file.[/red]")
         raise typer.Exit(1)
 
-    # Resolve executor mode
     mode = "demo" if demo else cfg.executor_mode
     executor = make_executor(mode, cfg.claude_cli_path)
 
-    # Resolve planner (skip in demo mode if no key)
+    # Resolve planner (stub in demo mode if no key)
     if mode == "demo" and not cfg.openai_api_key:
         from orchestrator.planner.openai_planner import OpenAIPlanner as _P
 
         class _DemoPlanner(_P):
-            def plan(self, task, repo_context, prev):  # type: ignore[override]
+            def plan(self, task, repo_context, recent_iterations, **kwargs):  # type: ignore[override]
                 return {
                     "objective": "[DEMO] Implement the task.",
                     "proposed_prompt": task[:1000],
@@ -87,11 +89,13 @@ def start(
             def ask(self, question, ctx):  # type: ignore[override]
                 return "[DEMO] Planner not available without OPENAI_API_KEY."
 
+            def compress_memory(self, working, project):  # type: ignore[override]
+                return working, project  # no-op in demo mode
+
         planner = _DemoPlanner(api_key="demo", model=cfg.openai_model)
     else:
         planner = _make_planner(cfg)
 
-    # Create run
     store = RunStore.create(cfg.log_dir, repo)
     store.write_task(task_text)
 
@@ -216,3 +220,76 @@ def review(
     console.print(f"[green]Reviewing run:[/green] {store.run_id}")
     runner = OrchestratorRunner(store, planner, executor, cfg)
     runner.run()
+
+
+# ---------------------------------------------------------------------------
+# memory subcommand group
+# ---------------------------------------------------------------------------
+
+memory_app = typer.Typer(help="Manage orchestrator memory for a target repo.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("init")
+def memory_init(
+    repo: str = typer.Option(".", help="Target repository path."),
+) -> None:
+    """Create .orchestrator/ memory files in the target repo (idempotent)."""
+    mem = MemoryManager(repo)
+    mem.init()
+    console.print(f"[green]Memory initialised:[/green] {mem.root}")
+    console.print(f"  {mem.project_memory_path}")
+    console.print(f"  {mem.working_memory_path}")
+    console.print(f"  {mem.snapshots_dir}/")
+
+
+@memory_app.command("status")
+def memory_status(
+    repo: str = typer.Option(".", help="Target repository path."),
+) -> None:
+    """Show memory saturation and snapshot history for the target repo."""
+    mem = MemoryManager(repo)
+    if not mem.working_memory_path.exists():
+        console.print("[yellow]No memory files found. Run `orchestrator memory init --repo PATH`.[/yellow]")
+        raise typer.Exit(0)
+
+    sat = mem.saturation_status()
+    rec = sat["recommendation"]
+    colour = {"healthy": "green", "monitor": "yellow",
+              "refresh soon": "yellow", "refresh now": "red"}.get(rec, "white")
+
+    console.print(f"\n[bold]Memory status:[/bold] {mem.root}")
+    console.print(f"  Char count        : {sat['char_count']}")
+    console.print(f"  Iterations stored : {sat['iterations_in_memory']}")
+    console.print(f"  Open questions    : {sat['open_questions']}")
+    console.print(f"  Stale items       : {sat['stale_items_detected']}")
+    console.print(f"  Recommendation    : [{colour}]{rec}[/{colour}]")
+
+    snapshots = mem.list_snapshots()
+    if snapshots:
+        console.print(f"\n  Snapshots ({len(snapshots)}):")
+        for s in snapshots[:5]:
+            console.print(f"    {s.name}")
+        if len(snapshots) > 5:
+            console.print(f"    … and {len(snapshots) - 5} more")
+    else:
+        console.print("\n  No snapshots yet.")
+
+
+@memory_app.command("refresh")
+def memory_refresh(
+    repo: str = typer.Option(".", help="Target repository path."),
+    config_file: Optional[Path] = typer.Option(None, "--config"),
+) -> None:
+    """Compress and archive working memory (requires OPENAI_API_KEY)."""
+    cfg = Config.load(config_file)
+    planner = _make_planner(cfg)
+    mem = MemoryManager(repo)
+    mem.init()
+
+    console.print("[dim]Compressing memory via LLM...[/dim]")
+    snapshot = mem.refresh(planner.compress_memory)
+    console.print(f"[green]Memory refreshed.[/green]")
+    console.print(f"  Snapshot : {snapshot}")
+    console.print(f"  Working  : {mem.working_memory_path}")
+    console.print(f"  Project  : {mem.project_memory_path}")
