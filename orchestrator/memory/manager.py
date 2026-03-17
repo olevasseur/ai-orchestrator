@@ -219,6 +219,41 @@ class MemoryManager:
             return []
         return sorted(self.snapshots_dir.glob("snapshot-*.md"), reverse=True)
 
+    # ------------------------------------------------------------------
+    # Execution checkpoint — survives validation interruption
+    # ------------------------------------------------------------------
+
+    @property
+    def exec_note_path(self) -> Path:
+        return self.root / "exec_note.md"
+
+    def save_exec_note(self, itr_n: int, objective: str, executor_stdout: str) -> None:
+        """Write a brief note capturing the executor's findings after a successful run.
+
+        Persists across restarts so the planner can read it even if validation was
+        interrupted before update_working_memory fired.  Cleared by clear_exec_note()
+        once the full iteration completes.
+        """
+        excerpt = (executor_stdout.strip()[-600:] if executor_stdout else "(no output)")
+        note = (
+            f"## Pending execution note — iteration {itr_n}\n\n"
+            f"**Objective:** {objective}\n\n"
+            f"**Executor exit code:** 0 (success)\n\n"
+            f"**Output excerpt:**\n{excerpt}\n\n"
+            f"*(Validation was interrupted. This note will be cleared after the next "
+            f"full iteration.)*\n"
+        )
+        self.exec_note_path.write_text(note)
+
+    def load_exec_note(self) -> str:
+        """Return the pending execution note, or empty string if none."""
+        return self.exec_note_path.read_text() if self.exec_note_path.exists() else ""
+
+    def clear_exec_note(self) -> None:
+        """Remove the execution note after a full iteration completes."""
+        if self.exec_note_path.exists():
+            self.exec_note_path.unlink()
+
 
 # ------------------------------------------------------------------
 # Private helpers

@@ -45,11 +45,13 @@ class OrchestratorRunner:
         planner: OpenAIPlanner,
         executor: BaseExecutor,
         config: Config,
+        yes: bool = False,
     ) -> None:
         self.store = store
         self.planner = planner
         self.executor = executor
         self.config = config
+        self.yes = yes  # skip all Confirm prompts when True
 
     # ------------------------------------------------------------------
     # Public API
@@ -145,6 +147,15 @@ class OrchestratorRunner:
                 diff = git_utils.diff_summary(run_state.repo_path)
                 self.store.write_git_diff(itr_n, diff)
 
+                # Checkpoint execution findings before validation so they survive
+                # if validation is interrupted (see clear_exec_note at end of loop).
+                if result.exit_code == 0:
+                    self.memory.save_exec_note(
+                        itr_n=itr_n,
+                        objective=itr_state.objective,
+                        executor_stdout=result.stdout,
+                    )
+
                 if result.timed_out:
                     itr_state.status = Status.TIMED_OUT
                     self._save_iteration(itr_state, run_state)
@@ -158,6 +169,7 @@ class OrchestratorRunner:
 
             # --- Memory update (deterministic, no LLM) ---
             self.memory.update_working_memory(itr_state)
+            self.memory.clear_exec_note()  # full iteration done; note is now in working memory
             sat = self.memory.saturation_status()
             ui.show_memory_saturation(sat)
 
@@ -199,6 +211,9 @@ class OrchestratorRunner:
                 ui.console.print(f"  [dim]{line}[/dim]")
             if len(dirty.splitlines()) > 10:
                 ui.console.print("  [dim]...[/dim]")
+            if self.yes:
+                ui.console.print("[dim]Proceeding (--yes).[/dim]")
+                return
             from rich.prompt import Confirm
             if not Confirm.ask("Proceed with execution anyway?", default=True):
                 raise RuntimeError("User aborted: uncommitted changes in repo.")
@@ -227,6 +242,12 @@ class OrchestratorRunner:
 
         project_memory = self.memory.load_project_memory()
         working_memory = self.memory.load_working_memory()
+
+        # If a prior execution succeeded but validation was interrupted, surface
+        # its findings to the planner so context isn't silently lost.
+        exec_note = self.memory.load_exec_note()
+        if exec_note:
+            working_memory = working_memory + "\n\n---\n\n" + exec_note
 
         request_data = {
             "task": task,
@@ -266,12 +287,16 @@ class OrchestratorRunner:
                                     "classification": "denied", "timed_out": False})
                 continue
             if safety == "needs_confirmation":
-                from rich.prompt import Confirm
-                if not Confirm.ask(f"  Run unrecognised command [yellow]{cmd}[/yellow]?"):
-                    exit_codes.append(-3)
-                    val_results.append({"cmd": cmd, "exit_code": -3,
-                                        "classification": "skipped", "timed_out": False})
-                    continue
+                if self.yes:
+                    # Command was part of the approved plan — skip re-confirmation.
+                    ui.console.print(f"  [dim]  (auto-approved via --yes)[/dim]")
+                else:
+                    from rich.prompt import Confirm
+                    if not Confirm.ask(f"  Run unrecognised command [yellow]{cmd}[/yellow]?"):
+                        exit_codes.append(-3)
+                        val_results.append({"cmd": cmd, "exit_code": -3,
+                                            "classification": "skipped", "timed_out": False})
+                        continue
 
             ui.console.print(f"  [dim]$ {cmd}[/dim]")
             vr = run_validation_command(cmd, run_state.repo_path, self.config.validation_timeout)

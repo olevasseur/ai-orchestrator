@@ -56,6 +56,10 @@ def start(
     ),
     demo: bool = typer.Option(False, "--demo", help="Demo mode: skip real Claude Code calls."),
     config_file: Optional[Path] = typer.Option(None, "--config", help="Path to config.yaml."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Auto-approve validation prompts and dirty-tree warnings (no interactive confirmation).",
+    ),
 ) -> None:
     """Start a new orchestration run."""
     cfg = Config.load(config_file)
@@ -109,7 +113,7 @@ def start(
     console.print(f"[green]Run created:[/green] {store.run_id}")
     console.print(f"[dim]Artifacts: {store.run_dir}[/dim]")
 
-    runner = OrchestratorRunner(store, planner, executor, cfg)
+    runner = OrchestratorRunner(store, planner, executor, cfg, yes=yes)
     runner.run()
 
 
@@ -147,6 +151,10 @@ def resume(
     run_id: Optional[str] = typer.Option(None, help="Run ID (default: most recent)."),
     demo: bool = typer.Option(False, "--demo"),
     config_file: Optional[Path] = typer.Option(None, "--config"),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Auto-approve validation prompts and dirty-tree warnings.",
+    ),
 ) -> None:
     """Resume an interrupted run from where it left off."""
     cfg = Config.load(config_file)
@@ -174,7 +182,7 @@ def resume(
     planner = _make_planner(cfg)
 
     console.print(f"[green]Resuming run:[/green] {store.run_id}")
-    runner = OrchestratorRunner(store, planner, executor, cfg)
+    runner = OrchestratorRunner(store, planner, executor, cfg, yes=yes)
     runner.run()
 
 

@@ -245,6 +245,39 @@ class TestRefresh:
 
 
 # ---------------------------------------------------------------------------
+# exec_note checkpoint
+# ---------------------------------------------------------------------------
+
+class TestExecNote:
+    def test_save_and_load(self, mem):
+        mem.save_exec_note(itr_n=3, objective="Fix the bug", executor_stdout="All clean.")
+        note = mem.load_exec_note()
+        assert "iteration 3" in note
+        assert "Fix the bug" in note
+        assert "All clean." in note
+
+    def test_load_returns_empty_when_absent(self, mem):
+        assert mem.load_exec_note() == ""
+
+    def test_clear_removes_file(self, mem):
+        mem.save_exec_note(itr_n=0, objective="x", executor_stdout="y")
+        mem.clear_exec_note()
+        assert mem.load_exec_note() == ""
+        assert not mem.exec_note_path.exists()
+
+    def test_clear_is_safe_when_absent(self, mem):
+        mem.clear_exec_note()  # should not raise
+
+    def test_long_stdout_is_truncated_to_600_chars(self, mem):
+        long_out = "x" * 2000
+        mem.save_exec_note(itr_n=0, objective="obj", executor_stdout=long_out)
+        note = mem.load_exec_note()
+        excerpt_start = note.index("**Output excerpt:**\n") + len("**Output excerpt:**\n")
+        excerpt = note[excerpt_start:].split("\n\n")[0]
+        assert len(excerpt) <= 600
+
+
+# ---------------------------------------------------------------------------
 # helper: _word_overlap
 # ---------------------------------------------------------------------------
 
