@@ -27,7 +27,32 @@
       border-radius: 50%; animation: spin 0.7s linear infinite;
       vertical-align: middle; margin-right: 6px;
     }
+    /* Copy button */
+    .copy-btn {
+      font-size: 11px; padding: 2px 8px; border-radius: 4px;
+      border: 1px solid #475569; color: #94a3b8; background: transparent;
+      cursor: pointer; line-height: 1.6; touch-action: manipulation;
+      min-height: 28px; min-width: 52px;
+    }
+    .copy-btn:hover { border-color: #94a3b8; color: #e2e8f0; }
+    .copy-btn.copied { border-color: #22c55e; color: #22c55e; }
   </style>
+  <script>
+    function copyText(text, btn) {
+      const reset = () => { btn.textContent = 'Copy'; btn.classList.remove('copied'); };
+      const ok = () => { btn.textContent = 'Copied!'; btn.classList.add('copied'); setTimeout(reset, 1600); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok).catch(() => fallback(text, ok));
+      } else { fallback(text, ok); }
+    }
+    function fallback(text, ok) {
+      const el = document.createElement('textarea');
+      el.value = text; el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+      document.body.appendChild(el); el.focus(); el.select();
+      try { document.execCommand('copy'); ok(); } catch(_) {}
+      document.body.removeChild(el);
+    }
+  </script>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen">
 

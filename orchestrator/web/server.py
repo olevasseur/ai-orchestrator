@@ -240,6 +240,38 @@ def _memory_ctx(sess: WebSession) -> Optional[dict]:
         return None
 
 
+def _tail(text: str, n_lines: int) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    return "\n".join(lines[-n_lines:])
+
+
+def _all_iter_details(sess: WebSession) -> list:
+    """Return per-iteration output details for completed iterations."""
+    if not sess._store:
+        return []
+    store = sess._store
+    details = []
+    for n in store.list_iterations():
+        itr = store.read_iteration_state(n) or {}
+        # Only include iterations that have at least started executing
+        if itr.get("status") not in ("queued", "running"):
+            out = store.read_executor_output(n)
+            details.append({
+                "number": n,
+                "objective": itr.get("objective", ""),
+                "status": itr.get("status", ""),
+                "human_decision": itr.get("human_decision", ""),
+                "executor_exit_code": itr.get("executor_exit_code"),
+                "validation_results": itr.get("validation_results", []),
+                "executor_stdout_tail": _tail(out.get("stdout", ""), 80),
+                "validation_stdout": out.get("validation_stdout", ""),
+                "git_diff": out.get("git_diff", ""),
+            })
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -282,10 +314,12 @@ async def run_page(request: Request):
         return RedirectResponse("/", status_code=303)
     log_tail = _executor_log_tail(session)
     mem = _memory_ctx(session)
+    iter_details = _all_iter_details(session)
     return templates.TemplateResponse(request, "run.html", {
         "session": session,
         "log_tail": log_tail,
         "memory": mem,
+        "iter_details": iter_details,
     })
 
 
