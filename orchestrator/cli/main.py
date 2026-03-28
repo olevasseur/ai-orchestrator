@@ -234,6 +234,33 @@ def review(
 # memory subcommand group
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# web
+# ---------------------------------------------------------------------------
+
+@app.command()
+def web(
+    host: str = typer.Option("0.0.0.0", help="Host to bind (0.0.0.0 = all interfaces)."),
+    port: int = typer.Option(7999, help="Port to listen on."),
+) -> None:
+    """Start the mobile-friendly web UI (requires: pip install 'orchestrator[web]')."""
+    try:
+        from orchestrator.web.server import app as _web_app  # noqa: F401
+        import uvicorn
+    except ImportError as exc:
+        console.print(f"[red]Missing web dependency: {exc}[/red]")
+        console.print("Install with:  pip install 'ai-orchestrator[web]'")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Starting web UI on http://{host}:{port}[/green]")
+    console.print("[dim]Open that address in your browser (or use your Tailscale IP).[/dim]")
+    uvicorn.run("orchestrator.web.server:app", host=host, port=port, reload=False)
+
+
+# ---------------------------------------------------------------------------
+# memory subcommand group
+# ---------------------------------------------------------------------------
+
 memory_app = typer.Typer(help="Manage orchestrator memory for a target repo.")
 app.add_typer(memory_app, name="memory")
 

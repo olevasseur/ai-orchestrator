@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if session.status == 'awaiting_review' %}Review plan — {% endif %}Orchestrator
+{% endblock %}
+
+{% block content %}
+
+{# Auto-refresh while the runner is active but not waiting for input #}
+{% if session.status in ('planning', 'executing', 'validating') %}
+<meta http-equiv="refresh" content="3">
+<script>
+  // Restore scroll position after meta-refresh
+  const y = sessionStorage.getItem('scrollY');
+  if (y) { window.scrollTo(0, parseInt(y)); sessionStorage.removeItem('scrollY'); }
+  window.addEventListener('beforeunload', () => sessionStorage.setItem('scrollY', window.scrollY));
+</script>
+{% endif %}
+
+
+{# ── STATUS BADGE ────────────────────────────────────────────────── #}
+<div class="mb-6">
+  <div class="flex items-center gap-3 mb-1">
+    {% if session.status == 'awaiting_review' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                   bg-amber-900/60 text-amber-300 text-sm font-semibold border border-amber-700">
+        👁 Awaiting your review
+      </span>
+    {% elif session.status == 'planning' %}
+      <span class="inline-flex items-center px-3 py-1 rounded-full
+                   bg-blue-900/60 text-blue-300 text-sm font-semibold border border-blue-700">
+        <span class="spinner"></span> Planning…
+      </span>
+    {% elif session.status == 'executing' %}
+      <span class="inline-flex items-center px-3 py-1 rounded-full
+                   bg-indigo-900/60 text-indigo-300 text-sm font-semibold border border-indigo-700">
+        <span class="spinner"></span> Claude Code running…
+      </span>
+    {% elif session.status == 'validating' %}
+      <span class="inline-flex items-center px-3 py-1 rounded-full
+                   bg-violet-900/60 text-violet-300 text-sm font-semibold border border-violet-700">
+        <span class="spinner"></span> Validating…
+      </span>
+    {% elif session.status == 'done' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                   bg-green-900/60 text-green-300 text-sm font-semibold border border-green-700">
+        ✓ Complete
+      </span>
+    {% elif session.status == 'stopped' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                   bg-slate-700 text-slate-400 text-sm font-semibold border border-slate-600">
+        ◼ Stopped
+      </span>
+    {% elif session.status == 'error' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                   bg-red-900/60 text-red-400 text-sm font-semibold border border-red-700">
+        ✗ Error
+      </span>
+    {% endif %}
+    <span class="text-xs text-slate-500">iteration {{ session.current_iteration }}</span>
+  </div>
+
+  {% if session.repo_path %}
+  <p class="text-xs text-slate-500 font-mono truncate">{{ session.repo_path }}</p>
+  {% endif %}
+</div>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# AWAITING REVIEW STATE                                             #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% if session.status == 'awaiting_review' and session.current_plan %}
+
+  {# Objective #}
+  <div class="bg-slate-800 border border-slate-600 rounded-xl p-4 mb-5">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">Objective</p>
+    <p class="text-slate-100 text-sm leading-relaxed">
+      {{ session.current_plan.objective }}
+    </p>
+  </div>
+
+  {# Validation commands #}
+  {% if session.current_plan.validation_commands %}
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
+      Validation commands
+    </p>
+    {% for cmd in session.current_plan.validation_commands %}
+    <div class="log-output text-slate-300 text-xs bg-slate-900 rounded px-3 py-2 mb-1">
+      $ {{ cmd }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# Risks / next step (collapsed by default on mobile) #}
+  {% if session.current_plan.risks or session.current_plan.next_step_framing %}
+  <details class="mb-5">
+    <summary class="text-xs text-slate-400 cursor-pointer select-none">
+      Risks &amp; next-step framing
+    </summary>
+    <div class="mt-3 space-y-3">
+      {% if session.current_plan.risks %}
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-300 leading-relaxed">
+        <span class="text-slate-500 font-semibold">Risks: </span>{{ session.current_plan.risks }}
+      </div>
+      {% endif %}
+      {% if session.current_plan.next_step_framing %}
+      <div class="bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-300 leading-relaxed">
+        <span class="text-slate-500 font-semibold">Next: </span>{{ session.current_plan.next_step_framing }}
+      </div>
+      {% endif %}
+    </div>
+  </details>
+  {% endif %}
+
+  {# Full prompt — collapsed, editable if needed #}
+  <details class="mb-6">
+    <summary class="text-xs text-slate-400 cursor-pointer select-none mb-2">
+      Full Claude Code prompt (tap to review / edit)
+    </summary>
+    <form action="/approve" method="post" class="mt-3">
+      <textarea name="prompt" rows="14"
+        class="w-full bg-slate-950 border border-slate-600 rounded-xl px-3 py-3
+               log-output text-slate-300 text-xs resize-y focus:outline-none focus:border-blue-500">{{ session.current_plan.proposed_prompt }}</textarea>
+      <button type="submit"
+        class="mt-3 w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl
+               text-sm font-semibold">
+        ✓ Approve with edits
+      </button>
+    </form>
+  </details>
+
+  {# Q&A history #}
+  {% if session.qa_history %}
+  <div class="mb-5 space-y-3">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest">Q&amp;A</p>
+    {% for item in session.qa_history %}
+    <div class="bg-slate-800 rounded-xl p-3 text-sm space-y-2">
+      <p class="text-blue-300"><span class="text-slate-500">Q: </span>{{ item.q }}</p>
+      <p class="text-slate-300 leading-relaxed"><span class="text-slate-500">A: </span>{{ item.a }}</p>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# Question form #}
+  <form action="/question" method="post" class="mb-6">
+    <div class="flex gap-2">
+      <input type="text" name="q" placeholder="Ask the planner a question…"
+        class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-3
+               text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 text-sm">
+      <button type="submit"
+        class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-3 rounded-lg text-sm font-medium">
+        Ask
+      </button>
+    </div>
+  </form>
+
+  {# Primary action buttons #}
+  <div class="space-y-3">
+    <form action="/approve" method="post">
+      <button type="submit"
+        class="w-full bg-green-600 hover:bg-green-500 text-white py-5 rounded-2xl
+               text-lg font-bold tracking-wide shadow-lg shadow-green-900/40">
+        ✓ Approve
+      </button>
+    </form>
+
+    <form action="/stop" method="post"
+      onsubmit="return confirm('Stop this run?')">
+      <button type="submit"
+        class="w-full bg-slate-700 hover:bg-red-900 text-slate-300 hover:text-red-300
+               py-3 rounded-xl text-sm font-medium border border-slate-600">
+        ◼ Stop run
+      </button>
+    </form>
+  </div>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# ACTIVE (PLANNING / EXECUTING / VALIDATING)                        #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% elif session.status in ('planning', 'executing', 'validating') %}
+
+  {% if session.task %}
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-5">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Task</p>
+    <p class="text-slate-300 text-sm leading-relaxed">{{ session.task }}</p>
+  </div>
+  {% endif %}
+
+  {% if session.status == 'executing' and log_tail %}
+  <div class="mb-4">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
+      Executor output
+    </p>
+    <div class="bg-slate-950 border border-slate-700 rounded-xl p-4 overflow-y-auto max-h-96">
+      <pre class="log-output text-green-400 text-xs">{{ log_tail }}</pre>
+    </div>
+  </div>
+  {% elif session.status == 'validating' %}
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+    <p class="text-sm text-slate-300">Running validation commands…</p>
+  </div>
+  {% endif %}
+
+  <form action="/stop" method="post"
+    onsubmit="return confirm('Stop this run?')"
+    class="mt-6">
+    <button type="submit"
+      class="w-full bg-slate-700 hover:bg-red-900 text-slate-300 hover:text-red-300
+             py-3 rounded-xl text-sm font-medium border border-slate-600">
+      ◼ Stop run
+    </button>
+  </form>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# DONE                                                              #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% elif session.status == 'done' %}
+
+  <div class="bg-green-900/30 border border-green-700 rounded-xl p-5 mb-6 text-center">
+    <p class="text-2xl mb-1">✓</p>
+    <p class="text-green-300 font-semibold">Task complete</p>
+    <p class="text-xs text-slate-400 mt-1">{{ session.current_iteration + 1 }} iteration(s)</p>
+  </div>
+
+  {% if session.task %}
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-5">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Task</p>
+    <p class="text-slate-300 text-sm leading-relaxed">{{ session.task }}</p>
+  </div>
+  {% endif %}
+
+  {% if memory %}
+  <div class="mb-6">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
+      Working memory
+    </p>
+    <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+      <div class="flex gap-4 text-xs text-slate-400 mb-3">
+        <span>{{ memory.char_count }} chars</span>
+        <span>{{ memory.iterations_in_memory }} iter</span>
+        <span class="{% if memory.recommendation == 'refresh now' %}text-red-400
+                     {% elif memory.recommendation == 'healthy' %}text-green-400
+                     {% else %}text-amber-400{% endif %}">
+          {{ memory.recommendation }}
+        </span>
+      </div>
+      <pre class="log-output text-slate-400 text-xs leading-relaxed max-h-48 overflow-y-auto">{{ memory.snippet }}</pre>
+    </div>
+  </div>
+  {% endif %}
+
+  <form action="/new" method="post">
+    <button type="submit"
+      class="w-full bg-green-600 hover:bg-green-500 text-white py-4 rounded-xl
+             text-base font-bold">
+      ▶ New task
+    </button>
+  </form>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# ERROR                                                             #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% elif session.status == 'error' %}
+
+  <div class="bg-red-900/30 border border-red-700 rounded-xl p-5 mb-6">
+    <p class="text-red-300 font-semibold mb-2">Runner error</p>
+    <pre class="log-output text-red-300 text-xs leading-relaxed overflow-x-auto max-h-64">{{ session.error }}</pre>
+  </div>
+
+  <form action="/new" method="post">
+    <button type="submit"
+      class="w-full bg-slate-700 hover:bg-slate-600 text-slate-200 py-4 rounded-xl
+             text-base font-semibold">
+      ← New task
+    </button>
+  </form>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# STOPPED                                                           #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% elif session.status == 'stopped' %}
+
+  <div class="bg-slate-700/40 border border-slate-600 rounded-xl p-5 mb-6 text-center">
+    <p class="text-slate-300 font-semibold">Run stopped</p>
+  </div>
+
+  <form action="/new" method="post">
+    <button type="submit"
+      class="w-full bg-slate-700 hover:bg-slate-600 text-slate-200 py-4 rounded-xl
+             text-base font-semibold">
+      ← New task
+    </button>
+  </form>
+
+{% endif %}
+
+{% endblock %}

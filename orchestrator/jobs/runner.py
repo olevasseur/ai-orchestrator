@@ -46,12 +46,19 @@ class OrchestratorRunner:
         executor: BaseExecutor,
         config: Config,
         yes: bool = False,
+        review_fn=None,
+        status_fn=None,
     ) -> None:
         self.store = store
         self.planner = planner
         self.executor = executor
         self.config = config
         self.yes = yes  # skip all Confirm prompts when True
+        # Optional callbacks for non-terminal drivers (e.g. web UI).
+        # review_fn(plan_dict, iteration, ask_planner) -> {"decision": ..., "prompt": ...}
+        self.review_fn = review_fn
+        # status_fn(status_str, iteration_n) — called at key phase transitions
+        self.status_fn = status_fn
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,6 +80,7 @@ class OrchestratorRunner:
 
             # --- Planning ---
             if itr_state.status == Status.QUEUED:
+                self._notify("planning", itr_n)
                 itr_state.status = Status.RUNNING
                 itr_state.started_at = datetime.utcnow().isoformat()
                 self._save_iteration(itr_state, run_state)
@@ -106,7 +114,10 @@ class OrchestratorRunner:
                     ctx = f"Task:\n{self.store.read_task()}\n\nPlan:\n{plan_dict}"
                     return self.planner.ask(question, ctx)
 
-                review = ui.run_review(plan_dict, itr_n, ask_planner)
+                if self.review_fn is not None:
+                    review = self.review_fn(plan_dict, itr_n, ask_planner)
+                else:
+                    review = ui.run_review(plan_dict, itr_n, ask_planner)
                 itr_state.human_decision = review["decision"]
                 approved_prompt = review["prompt"]
 
@@ -128,6 +139,7 @@ class OrchestratorRunner:
 
             # --- Execution ---
             if itr_state.status == Status.RUNNING and not itr_state.executor_exit_code:
+                self._notify("executing", itr_n)
                 itr_dir = self.store.iteration_dir(itr_n)
                 result = self.executor.run(
                     prompt=itr_state.proposed_prompt,
@@ -165,6 +177,7 @@ class OrchestratorRunner:
                     return
 
             # --- Validation ---
+            self._notify("validating", itr_n)
             self._run_validation(itr_state, run_state)
 
             # --- Memory update (deterministic, no LLM) ---
@@ -377,3 +390,8 @@ class OrchestratorRunner:
     def _save_run_state(self, run: RunState) -> None:
         run.touch()
         self.store.write_state(run.to_dict())
+
+    def _notify(self, status: str, iteration: int = 0) -> None:
+        """Signal a phase transition to an external driver (e.g. web UI)."""
+        if self.status_fn is not None:
+            self.status_fn(status, iteration)

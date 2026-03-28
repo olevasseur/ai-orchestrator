@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1e293b">
+  <title>{% block title %}Orchestrator{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Prevent iOS zoom on input focus */
+    input, textarea, select { font-size: 16px !important; }
+    /* Smooth scroll position restore after meta-refresh */
+    html { scroll-behavior: auto; }
+    /* Terminal-style log output */
+    .log-output {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid #94a3b8; border-top-color: #3b82f6;
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+
+  <!-- Header bar -->
+  <div class="bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+    <a href="/" class="text-slate-100 font-bold tracking-tight">
+      ⚙ Orchestrator
+    </a>
+    {% if session.run_id %}
+    <div class="text-xs text-slate-400 font-mono truncate max-w-[60%] text-right">
+      {{ session.run_id }}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Page content -->
+  <div class="max-w-2xl mx-auto px-4 py-6 pb-24">
+    {% block content %}{% endblock %}
+  </div>
+
+</body>
+</html>

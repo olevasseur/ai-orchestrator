@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Orchestrator — Start{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="bg-red-900/50 border border-red-700 rounded-lg p-4 mb-6 text-red-300 text-sm">
+  ⚠ {{ error }}
+</div>
+{% endif %}
+
+{% if session.status != "idle" %}
+<div class="bg-blue-900/40 border border-blue-700 rounded-lg p-4 mb-6">
+  <p class="text-sm text-blue-300 mb-2">
+    Run in progress — iteration {{ session.current_iteration }}
+  </p>
+  <a href="/run"
+     class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold">
+    Resume view →
+  </a>
+</div>
+{% endif %}
+
+<h1 class="text-xl font-bold mb-6 text-slate-100">New task</h1>
+
+<form action="/start" method="post" class="space-y-5">
+  <div>
+    <label class="block text-sm font-medium text-slate-300 mb-1">
+      Repository path
+    </label>
+    <input type="text" name="repo_path" required
+      placeholder="/Users/you/repos/my-project"
+      value="{{ session.repo_path or '' }}"
+      class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-3
+             text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500">
+  </div>
+
+  <div>
+    <label class="block text-sm font-medium text-slate-300 mb-1">
+      Task description
+    </label>
+    <textarea name="task" required rows="6"
+      placeholder="Describe what you want done. Be specific — the planner will read this and propose a step-by-step plan before any code runs."
+      class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-3
+             text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500
+             resize-none"></textarea>
+  </div>
+
+  <button type="submit"
+    {% if session.is_busy() %}disabled{% endif %}
+    class="w-full bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed
+           text-white py-4 rounded-xl text-base font-bold tracking-wide">
+    ▶ Start
+  </button>
+</form>
+
+
+{% if runs %}
+<div class="mt-10">
+  <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
+    Recent runs
+  </h2>
+  <div class="space-y-2">
+    {% for run in runs %}
+    <div class="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-sm">
+      <div class="font-mono text-xs text-slate-500 mb-1">{{ run.run_id }}</div>
+      <div class="text-slate-300 text-xs truncate mb-2">{{ run.repo_path }}</div>
+      <span class="px-2 py-0.5 rounded text-xs font-medium
+        {% if run.status == 'succeeded' %}bg-green-900 text-green-300
+        {% elif run.status in ('failed', 'timed_out') %}bg-red-900 text-red-300
+        {% elif run.status == 'stopped' %}bg-slate-700 text-slate-400
+        {% elif run.status in ('queued', 'running', 'awaiting_review') %}bg-blue-900 text-blue-300
+        {% else %}bg-slate-700 text-slate-400{% endif %}">
+        {{ run.status }}
+      </span>
+      <span class="text-xs text-slate-600 ml-2">iter {{ run.current_iteration }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
