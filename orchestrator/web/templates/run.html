@@ -132,6 +132,11 @@
                    bg-amber-900/60 text-amber-300 text-sm font-semibold border border-amber-700">
         ⏸ Paused — iteration {{ session.last_iter_summary.number if session.last_iter_summary else session.current_iteration }} complete
       </span>
+    {% elif session.status == 'interrupted' %}
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                   bg-orange-900/60 text-orange-300 text-sm font-semibold border border-orange-700">
+        ⚡ Interrupted
+      </span>
     {% elif session.status == 'stopped' %}
       <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
                    bg-slate-700 text-slate-400 text-sm font-semibold border border-slate-600">
@@ -519,6 +524,64 @@
       ▶ New task
     </button>
   </form>
+
+
+{# ══════════════════════════════════════════════════════════════════ #}
+{# INTERRUPTED — server restarted while a run was active            #}
+{# ══════════════════════════════════════════════════════════════════ #}
+{% elif session.status == 'interrupted' %}
+
+  <div class="bg-orange-900/30 border border-orange-700 rounded-xl p-5 mb-6">
+    <p class="text-orange-300 font-semibold mb-1">Run interrupted</p>
+    <p class="text-xs text-slate-400">The server restarted while this run was active. Resume to continue from where it left off, or abandon it to start a new task.</p>
+  </div>
+
+  {% if session.task %}
+  <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-5">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Task</p>
+    <p class="text-slate-300 text-sm leading-relaxed">{{ session.task }}</p>
+  </div>
+  {% endif %}
+
+  {% if iter_details %}
+  <div class="mb-5">
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">Completed iterations</p>
+    {% for itr in iter_details %}
+    {{ render_iter_details(itr) }}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if memory %}
+  <details class="mb-5 border border-slate-700 rounded-xl overflow-hidden">
+    <summary class="flex items-center justify-between px-4 py-3 bg-slate-800 cursor-pointer select-none text-sm">
+      <span class="font-medium text-slate-300">Working memory</span>
+      <span class="text-xs text-slate-500">{{ memory.char_count }} chars · {{ memory.iterations_in_memory }} iter(s)</span>
+    </summary>
+    <div class="bg-slate-900 px-4 py-4">
+      <pre class="log-output text-slate-300 text-xs leading-relaxed overflow-y-auto max-h-64">{{ memory.snippet }}</pre>
+    </div>
+  </details>
+  {% endif %}
+
+  <div class="space-y-3">
+    <form action="/resume" method="post">
+      <button type="submit"
+        class="w-full bg-orange-600 hover:bg-orange-500 text-white py-5 rounded-2xl
+               text-lg font-bold tracking-wide shadow-lg shadow-orange-900/40">
+        ▶ Resume run
+      </button>
+    </form>
+
+    <form action="/abandon" method="post"
+      onsubmit="return confirm('Abandon this run? This cannot be undone.')">
+      <button type="submit"
+        class="w-full bg-slate-700 hover:bg-red-900 text-slate-300 hover:text-red-300
+               py-3 rounded-xl text-sm font-medium border border-slate-600">
+        ✕ Abandon run
+      </button>
+    </form>
+  </div>
 
 
 {# ══════════════════════════════════════════════════════════════════ #}

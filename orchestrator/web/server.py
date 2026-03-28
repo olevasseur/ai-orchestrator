@@ -101,6 +101,62 @@ class WebSession:
 # Module-level singleton — one active session at a time.
 session = WebSession()
 
+# Statuses that mean a run has permanently finished (no resume possible).
+_TERMINAL_STATUSES = {"succeeded", "stopped", "timed_out", "failed"}
+
+
+def _restore_session_from_disk() -> None:
+    """At module load, restore the most recent non-terminal run from disk.
+
+    Sets session.status = "interrupted" so the UI can prompt the user to
+    Resume or Abandon before any new planner call is made.
+    """
+    try:
+        cfg = Config.load()
+        store = RunStore.latest(cfg.log_dir)
+        if store is None:
+            return
+        state = store.read_state()
+        if not state:
+            return
+        if state.get("status") in _TERMINAL_STATUSES:
+            return
+
+        session.run_id = state.get("run_id") or store.run_id
+        session.repo_path = state.get("repo_path", "")
+        session.task = store.read_task()
+        session.current_iteration = state.get("current_iteration", 0)
+        session._store = store
+        session.status = "interrupted"
+
+        # Restore current plan if the interrupted iteration was awaiting review.
+        itr_n = session.current_iteration
+        itr_state = store.read_iteration_state(itr_n)
+        if itr_state.get("status") == "awaiting_review":
+            session.current_plan = {
+                "objective": itr_state.get("objective", ""),
+                "proposed_prompt": itr_state.get("proposed_prompt", ""),
+                "validation_commands": itr_state.get("validation_commands", []),
+                "risks": itr_state.get("risks", ""),
+                "next_step_framing": itr_state.get("next_step_framing", ""),
+            }
+
+        # Restore last_iter_summary from the previous completed iteration.
+        if itr_n > 0:
+            prev = store.read_iteration_state(itr_n - 1)
+            if prev.get("status") == "succeeded":
+                session.last_iter_summary = {
+                    "number": prev.get("number", itr_n - 1),
+                    "objective": prev.get("objective", ""),
+                    "validation_results": prev.get("validation_results", []),
+                    "executor_exit_code": prev.get("executor_exit_code"),
+                }
+    except Exception:
+        pass  # Never crash at startup due to restore failure
+
+
+_restore_session_from_disk()
+
 
 # ---------------------------------------------------------------------------
 # FastAPI app + templates
@@ -219,6 +275,37 @@ def _launch_runner(sess: WebSession, repo_path: str, task: str, cfg: Config) -> 
     sess._thread.start()
 
 
+def _resume_run(sess: WebSession) -> None:
+    """Resume an interrupted run, reusing its existing store."""
+    cfg = Config.load()
+    planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
+    executor = make_executor(cfg.executor_mode, cfg.claude_cli_path)
+
+    sess._planner = planner
+    sess.status = "planning"
+    sess.review_event = threading.Event()
+    sess.post_iter_event = threading.Event()
+
+    runner = OrchestratorRunner(
+        store=sess._store,
+        planner=planner,
+        executor=executor,
+        config=cfg,
+        yes=True,
+        review_fn=_make_review_fn(sess),
+        status_fn=_make_status_fn(sess),
+        post_iter_fn=_make_post_iter_fn(sess),
+    )
+
+    sess._thread = threading.Thread(
+        target=_run_in_thread,
+        args=(sess, runner),
+        daemon=True,
+        name="orchestrator-runner",
+    )
+    sess._thread.start()
+
+
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -320,6 +407,9 @@ async def start(
     task: str = Form(...),
 ):
     if session.is_busy():
+        return RedirectResponse("/run", status_code=303)
+    # Block new runs while an interrupted run awaits explicit user decision.
+    if session.status == "interrupted":
         return RedirectResponse("/run", status_code=303)
 
     repo = Path(repo_path.strip()).expanduser().resolve()
@@ -428,6 +518,30 @@ async def question(q: str = Form(...)):
         answer = f"[Error asking planner: {exc}]"
     session.qa_history.append({"q": q, "a": answer})
     return RedirectResponse("/run", status_code=303)
+
+
+@app.post("/resume")
+async def resume():
+    if session.status != "interrupted":
+        return RedirectResponse("/run", status_code=303)
+    if not session._store:
+        return RedirectResponse("/", status_code=303)
+    cfg = Config.load()
+    if not cfg.openai_api_key:
+        return RedirectResponse("/?error=OPENAI_API_KEY+not+set+in+.env", status_code=303)
+    _resume_run(session)
+    return RedirectResponse("/run", status_code=303)
+
+
+@app.post("/abandon")
+async def abandon():
+    if session.status == "interrupted" and session._store:
+        # Mark the run as stopped on disk so it won't be restored again.
+        state = session._store.read_state()
+        state["status"] = "stopped"
+        session._store.write_state(state)
+    session.reset()
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/new")

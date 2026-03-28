@@ -9,7 +9,19 @@
 </div>
 {% endif %}
 
-{% if session.status != "idle" %}
+{% if session.status == 'interrupted' %}
+<div class="bg-orange-900/40 border border-orange-700 rounded-lg p-4 mb-6">
+  <p class="text-sm text-orange-300 font-semibold mb-1">⚡ Interrupted run detected</p>
+  <p class="text-xs text-slate-400 mb-3">
+    Run <span class="font-mono">{{ session.run_id }}</span> was interrupted by a server restart.
+    You must Resume or Abandon it before starting a new task.
+  </p>
+  <a href="/run"
+     class="inline-block bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-semibold">
+    View interrupted run →
+  </a>
+</div>
+{% elif session.status != "idle" %}
 <div class="bg-blue-900/40 border border-blue-700 rounded-lg p-4 mb-6">
   <p class="text-sm text-blue-300 mb-2">
     Run in progress — iteration {{ session.current_iteration }}
@@ -47,7 +59,7 @@
   </div>
 
   <button type="submit"
-    {% if session.is_busy() %}disabled{% endif %}
+    {% if session.is_busy() or session.status == 'interrupted' %}disabled{% endif %}
     class="w-full bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed
            text-white py-4 rounded-xl text-base font-bold tracking-wide">
     ▶ Start
