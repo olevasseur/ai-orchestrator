@@ -261,7 +261,7 @@ def _memory_ctx(sess: WebSession) -> Optional[dict]:
         return None
     try:
         sat = mem.saturation_status()
-        sat["snippet"] = mem.load_working_memory()[-600:]
+        sat["snippet"] = mem.load_working_memory()
         return sat
     except Exception:
         return None
@@ -400,6 +400,22 @@ async def question(q: str = Form(...)):
             f"Completed iteration {s['number']}:\n"
             f"Objective: {s['objective']}\n"
             f"Validation:\n{val_lines or '  (none)'}"
+        )
+    elif session.status == "done":
+        working_memory = ""
+        if session.repo_path:
+            try:
+                working_memory = MemoryManager(session.repo_path).load_working_memory()
+            except Exception:
+                pass
+        last = ""
+        if session.last_iter_summary:
+            s = session.last_iter_summary
+            last = f"\nLast iteration objective: {s['objective']}"
+        ctx = (
+            f"Task:\n{session.task}\n"
+            f"{last}\n\n"
+            f"Working memory (accumulated project context):\n{working_memory}"
         )
     else:
         return RedirectResponse("/run", status_code=303)
