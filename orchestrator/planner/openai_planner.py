@@ -54,6 +54,20 @@ Rules:
 - If a previous validation showed missing_tool, address environment setup first.
 """
 
+_ASK_SYSTEM = """You are an assistant helping a developer understand the current state of a software project managed by an AI coding orchestrator.
+
+You will be given context about the current task, recent iteration history, working memory, and/or a proposed plan. Answer the user's question directly in clear prose.
+
+Rules:
+- Start with a direct answer to the question — no preamble.
+- Ground your answer in the context provided; do not speculate beyond it.
+- Write for a developer who wants to understand what is happening and why.
+- If helpful, use short labelled sections (e.g. "Current state:", "Blocker:", "Relevant files:", "Suggested next step:") but only when they add clarity.
+- Do NOT produce a JSON planning object.
+- Do NOT generate implementation prompts, validation command lists, or plan fields unless the user explicitly asks for a plan.
+- Keep the answer concise. Prefer a few clear sentences over exhaustive lists.
+"""
+
 _COMPRESS_SYSTEM = """You are compressing an orchestrator's working memory log.
 
 You will receive the current working_memory.md and project_memory.md.
@@ -120,9 +134,9 @@ class OpenAIPlanner:
         return data
 
     def ask(self, question: str, context: str) -> str:
-        """Ad-hoc follow-up question to the planner (during review step)."""
+        """Ad-hoc follow-up question answered in natural language (not a plan)."""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _ASK_SYSTEM},
             {"role": "user", "content": f"## Context\n{context}\n\n## Question\n{question}"},
         ]
         response = self.client.chat.completions.create(
