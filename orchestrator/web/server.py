@@ -15,6 +15,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import traceback
 from dataclasses import dataclass, field
@@ -354,6 +355,23 @@ def _memory_ctx(sess: WebSession) -> Optional[dict]:
         return None
 
 
+def _parse_qa_answer(raw: str):
+    """Return a parsed dict if the answer is a plan-shaped JSON, else the raw string.
+
+    The planner's system prompt instructs it to always respond with JSON
+    (objective / proposed_prompt / validation_commands / risks / …).
+    We detect that and let the template render it nicely; plain-text answers
+    fall through unchanged.
+    """
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "objective" in parsed:
+            return parsed
+    except Exception:
+        pass
+    return raw
+
+
 def _tail(text: str, n_lines: int) -> str:
     if not text:
         return ""
@@ -516,7 +534,7 @@ async def question(q: str = Form(...)):
         )
     except Exception as exc:
         answer = f"[Error asking planner: {exc}]"
-    session.qa_history.append({"q": q, "a": answer})
+    session.qa_history.append({"q": q, "a": _parse_qa_answer(answer)})
     return RedirectResponse("/run", status_code=303)
 
 

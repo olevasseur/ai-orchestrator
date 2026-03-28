@@ -85,6 +85,65 @@
 {% endmacro %}
 
 
+{# ── Macro: render one Q&A item (handles plain text + structured JSON) ── #}
+{% macro render_qa_item(item) %}
+<div class="bg-slate-800 rounded-xl p-4 text-sm space-y-3">
+  <p class="text-blue-300 text-sm"><span class="text-slate-500">Q: </span>{{ item.q }}</p>
+
+  {% if item.a is mapping %}
+    {# Structured plan-shaped answer — render sections cleanly #}
+
+    {% if item.a.objective %}
+    <div>
+      <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Answer</p>
+      <p class="text-slate-100 leading-relaxed">{{ item.a.objective }}</p>
+    </div>
+    {% endif %}
+
+    {% if item.a.risks %}
+    <p class="text-xs text-slate-400 leading-relaxed">
+      <span class="font-semibold text-slate-500">Risks: </span>{{ item.a.risks }}
+    </p>
+    {% endif %}
+
+    {% if item.a.next_step_framing %}
+    <p class="text-xs text-slate-400 leading-relaxed">
+      <span class="font-semibold text-slate-500">Next: </span>{{ item.a.next_step_framing }}
+    </p>
+    {% endif %}
+
+    {% if item.a.validation_commands %}
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest">Validation commands</p>
+        <button class="copy-btn" onclick='copyText({{ item.a.validation_commands | join("\n") | tojson }}, this)'>Copy</button>
+      </div>
+      {% for cmd in item.a.validation_commands %}
+      <div class="log-output text-slate-300 text-xs bg-slate-900 rounded px-3 py-2 mb-1">$ {{ cmd }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if item.a.proposed_prompt %}
+    <details>
+      <summary class="text-xs text-slate-400 cursor-pointer select-none">Suggested prompt (tap to expand)</summary>
+      <div class="mt-2">
+        <div class="flex justify-end mb-1">
+          <button class="copy-btn" onclick='copyText({{ item.a.proposed_prompt | tojson }}, this)'>Copy</button>
+        </div>
+        <pre class="log-output text-slate-300 text-xs bg-slate-950 rounded px-3 py-3 max-h-48 overflow-y-auto whitespace-pre-wrap">{{ item.a.proposed_prompt }}</pre>
+      </div>
+    </details>
+    {% endif %}
+
+  {% else %}
+    {# Plain text answer #}
+    <p class="text-slate-300 leading-relaxed whitespace-pre-wrap">{{ item.a }}</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+
 {% block content %}
 
 {# Auto-refresh while the runner is active but not waiting for input #}
@@ -244,10 +303,7 @@
   <div class="mb-5 space-y-3">
     <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest">Q&amp;A</p>
     {% for item in session.qa_history %}
-    <div class="bg-slate-800 rounded-xl p-3 text-sm space-y-2">
-      <p class="text-blue-300"><span class="text-slate-500">Q: </span>{{ item.q }}</p>
-      <p class="text-slate-300 leading-relaxed"><span class="text-slate-500">A: </span>{{ item.a }}</p>
-    </div>
+    {{ render_qa_item(item) }}
     {% endfor %}
   </div>
   {% endif %}
@@ -366,10 +422,7 @@
   <div class="mb-5 space-y-3">
     <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest">Q&amp;A</p>
     {% for item in session.qa_history %}
-    <div class="bg-slate-800 rounded-xl p-3 text-sm space-y-2">
-      <p class="text-blue-300"><span class="text-slate-500">Q: </span>{{ item.q }}</p>
-      <p class="text-slate-300 leading-relaxed"><span class="text-slate-500">A: </span>{{ item.a }}</p>
-    </div>
+    {{ render_qa_item(item) }}
     {% endfor %}
   </div>
   {% endif %}
@@ -497,10 +550,7 @@
   <div class="mb-5 space-y-3">
     <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest">Q&amp;A</p>
     {% for item in session.qa_history %}
-    <div class="bg-slate-800 rounded-xl p-3 text-sm space-y-2">
-      <p class="text-blue-300"><span class="text-slate-500">Q: </span>{{ item.q }}</p>
-      <p class="text-slate-300 leading-relaxed"><span class="text-slate-500">A: </span>{{ item.a }}</p>
-    </div>
+    {{ render_qa_item(item) }}
     {% endfor %}
   </div>
   {% endif %}
