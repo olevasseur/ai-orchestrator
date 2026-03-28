@@ -41,16 +41,35 @@
     function copyText(text, btn) {
       const reset = () => { btn.textContent = 'Copy'; btn.classList.remove('copied'); };
       const ok = () => { btn.textContent = 'Copied!'; btn.classList.add('copied'); setTimeout(reset, 1600); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(ok).catch(() => fallback(text, ok));
-      } else { fallback(text, ok); }
+      // navigator.clipboard requires HTTPS or localhost (window.isSecureContext).
+      // Over plain HTTP (e.g. Tailscale without TLS) it is unavailable or will reject.
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(ok).catch(() => execFallback(text, ok));
+      } else {
+        execFallback(text, ok);
+      }
     }
-    function fallback(text, ok) {
+    function execFallback(text, ok) {
+      // textarea must be off-screen but rendered (not display:none / opacity:0)
+      // so iOS will allow the selection to be copied.
       const el = document.createElement('textarea');
-      el.value = text; el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
-      document.body.appendChild(el); el.focus(); el.select();
-      try { document.execCommand('copy'); ok(); } catch(_) {}
+      el.value = text;
+      el.setAttribute('readonly', '');
+      el.style.cssText = 'position:absolute;left:-9999px;top:' + (window.scrollY || 0) + 'px';
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      el.setSelectionRange(0, el.value.length);   // required on iOS
+      let copied = false;
+      try { copied = document.execCommand('copy'); } catch(_) {}
       document.body.removeChild(el);
+      if (copied) {
+        ok();
+      } else {
+        // Both methods failed (HTTP + mobile restrictions). Show a prompt so the
+        // user can copy manually — works on every browser without HTTPS.
+        window.prompt('Copy:', text);
+      }
     }
   </script>
 </head>
