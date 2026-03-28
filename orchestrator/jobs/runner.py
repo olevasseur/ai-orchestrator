@@ -48,6 +48,7 @@ class OrchestratorRunner:
         yes: bool = False,
         review_fn=None,
         status_fn=None,
+        post_iter_fn=None,
     ) -> None:
         self.store = store
         self.planner = planner
@@ -59,6 +60,9 @@ class OrchestratorRunner:
         self.review_fn = review_fn
         # status_fn(status_str, iteration_n) — called at key phase transitions
         self.status_fn = status_fn
+        # post_iter_fn(itr_state, run_state) -> "continue" | "stopped"
+        # Called after each completed iteration; blocks until user decides to proceed.
+        self.post_iter_fn = post_iter_fn
 
     # ------------------------------------------------------------------
     # Public API
@@ -197,6 +201,16 @@ class OrchestratorRunner:
             run_state.current_iteration += 1
             run_state.touch()
             self._save_run_state(run_state)
+
+            # --- Post-iteration pause (web UI only) ---
+            # Blocks here until the user clicks Continue or Stop.
+            # The terminal CLI path leaves post_iter_fn=None and loops immediately.
+            if self.post_iter_fn is not None:
+                decision = self.post_iter_fn(itr_state, run_state)
+                if decision == "stopped":
+                    run_state.status = Status.STOPPED
+                    self._save_run_state(run_state)
+                    return
 
     # ------------------------------------------------------------------
     # Internal helpers

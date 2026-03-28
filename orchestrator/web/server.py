@@ -57,9 +57,14 @@ class WebSession:
     # Q&A during review (out-of-band planner calls)
     qa_history: list = field(default_factory=list)
 
-    # Runner ↔ web communication
+    # Runner ↔ web communication (plan review)
     review_event: threading.Event = field(default_factory=threading.Event)
     review_decision: Optional[dict] = None
+
+    # Runner ↔ web communication (post-iteration pause)
+    post_iter_event: threading.Event = field(default_factory=threading.Event)
+    post_iter_decision: Optional[str] = None   # "continue" | "stopped"
+    last_iter_summary: Optional[dict] = None   # snapshot of just-completed iteration
 
     # Handles to planner + store for in-request use (questions, log reading)
     _planner: Optional[OpenAIPlanner] = None
@@ -84,6 +89,9 @@ class WebSession:
         self.qa_history = []
         self.review_event = threading.Event()
         self.review_decision = None
+        self.post_iter_event = threading.Event()
+        self.post_iter_decision = None
+        self.last_iter_summary = None
         self._planner = None
         self._store = None
         self.error = None
@@ -139,6 +147,24 @@ def _make_status_fn(sess: WebSession) -> Callable:
     return status_fn
 
 
+def _make_post_iter_fn(sess: WebSession) -> Callable:
+    """Block after each completed iteration until the user clicks Continue or Stop."""
+    def post_iter_fn(itr_state, run_state) -> str:
+        sess.last_iter_summary = {
+            "number": itr_state.number,
+            "objective": itr_state.objective,
+            "validation_results": itr_state.validation_results or [],
+            "executor_exit_code": itr_state.executor_exit_code,
+        }
+        sess.qa_history = []
+        sess.status = "paused"
+        sess.post_iter_event.clear()
+        sess.post_iter_event.wait(timeout=7200)
+        sess.post_iter_event.clear()
+        return sess.post_iter_decision or "stopped"
+    return post_iter_fn
+
+
 def _run_in_thread(sess: WebSession, runner: OrchestratorRunner) -> None:
     try:
         runner.run()
@@ -174,6 +200,7 @@ def _launch_runner(sess: WebSession, repo_path: str, task: str, cfg: Config) -> 
         yes=True,                          # skip all Confirm prompts
         review_fn=_make_review_fn(sess),
         status_fn=_make_status_fn(sess),
+        post_iter_fn=_make_post_iter_fn(sess),
     )
 
     sess.run_id = store.run_id
@@ -339,16 +366,43 @@ async def approve(prompt: Optional[str] = Form(default=None)):
 @app.post("/stop")
 async def stop():
     session.review_decision = {"decision": "stopped", "prompt": ""}
+    session.post_iter_decision = "stopped"
     session.status = "stopped"
     session.review_event.set()
+    session.post_iter_event.set()
+    return RedirectResponse("/run", status_code=303)
+
+
+@app.post("/continue")
+async def continue_run():
+    if session.status != "paused":
+        return RedirectResponse("/run", status_code=303)
+    session.post_iter_decision = "continue"
+    session.status = "planning"   # optimistic — runner will call status_fn immediately
+    session.post_iter_event.set()
     return RedirectResponse("/run", status_code=303)
 
 
 @app.post("/question")
 async def question(q: str = Form(...)):
-    if not session._planner or not session.current_plan:
+    if not session._planner:
         return RedirectResponse("/run", status_code=303)
-    ctx = f"Task:\n{session.task}\n\nPlan:\n{session.current_plan}"
+    if session.status == "awaiting_review" and session.current_plan:
+        ctx = f"Task:\n{session.task}\n\nPlan:\n{session.current_plan}"
+    elif session.status == "paused" and session.last_iter_summary:
+        s = session.last_iter_summary
+        val_lines = "\n".join(
+            f"  {'✓' if r.get('exit_code') == 0 else '✗'} {r.get('cmd')} ({r.get('classification')})"
+            for r in s["validation_results"]
+        )
+        ctx = (
+            f"Task:\n{session.task}\n\n"
+            f"Completed iteration {s['number']}:\n"
+            f"Objective: {s['objective']}\n"
+            f"Validation:\n{val_lines or '  (none)'}"
+        )
+    else:
+        return RedirectResponse("/run", status_code=303)
     try:
         # Planner.ask() is a blocking LLM call — run off the event loop.
         answer = await asyncio.get_event_loop().run_in_executor(
