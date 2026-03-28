@@ -247,6 +247,9 @@ class OrchestratorRunner:
 
     def _call_planner(self, run_state: RunState, itr_n: int) -> dict:
         task = self.store.read_task()
+        # Re-read from disk to pick up active_objective set via the web UI mid-run.
+        fresh_state = self.store.read_state()
+        active_objective = fresh_state.get("active_objective") or task
         repo_ctx = git_utils.repo_context(run_state.repo_path)
 
         # Last 3 iterations only — older context lives in working_memory.md
@@ -277,7 +280,8 @@ class OrchestratorRunner:
             working_memory = working_memory + "\n\n---\n\n" + exec_note
 
         request_data = {
-            "task": task,
+            "task": task,                    # original, for logging
+            "active_objective": active_objective,  # what the planner actually uses
             "project_memory": project_memory,
             "working_memory": working_memory,
             "repo_context": repo_ctx,
@@ -286,7 +290,7 @@ class OrchestratorRunner:
         self.store.write_planner_request(itr_n, request_data)
 
         plan = self.planner.plan(
-            task, repo_ctx, recent_iterations,
+            active_objective, repo_ctx, recent_iterations,
             project_memory=project_memory,
             working_memory=working_memory,
         )

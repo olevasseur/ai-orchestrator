@@ -73,6 +73,8 @@ class WebSession:
 
     # Error detail
     error: Optional[str] = None
+    active_objective: Optional[str] = None
+    queued_next_objective: Optional[str] = None
 
     # Background thread handle
     _thread: Optional[threading.Thread] = None
@@ -96,6 +98,8 @@ class WebSession:
         self._planner = None
         self._store = None
         self.error = None
+        self.active_objective = None
+        self.queued_next_objective = None
         self._thread = None
 
 
@@ -128,6 +132,8 @@ def _restore_session_from_disk() -> None:
         session.task = store.read_task()
         session.current_iteration = state.get("current_iteration", 0)
         session._store = store
+        session.active_objective = state.get("active_objective") or session.task or ""
+        session.queued_next_objective = state.get("queued_next_objective") or ""
         session.status = "interrupted"
 
         # Restore current plan if the interrupted iteration was awaiting review.
@@ -246,6 +252,7 @@ def _launch_runner(sess: WebSession, repo_path: str, task: str, cfg: Config) -> 
         run_id=store.run_id,
         repo_path=str(Path(repo_path).resolve()),
         status=Status.QUEUED,
+        active_objective=task.strip(),
     )
     store.write_state(run_state.to_dict())
 
@@ -263,6 +270,7 @@ def _launch_runner(sess: WebSession, repo_path: str, task: str, cfg: Config) -> 
     sess.run_id = store.run_id
     sess.repo_path = repo_path
     sess.task = task
+    sess.active_objective = task.strip()
     sess._planner = planner
     sess._store = store
     sess.status = "planning"
@@ -310,6 +318,16 @@ def _resume_run(sess: WebSession) -> None:
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
+
+def _write_objective_state(sess: WebSession) -> None:
+    """Persist active_objective and queued_next_objective to state.yaml."""
+    if not sess._store:
+        return
+    state = sess._store.read_state()
+    state["active_objective"] = sess.active_objective or ""
+    state["queued_next_objective"] = sess.queued_next_objective or ""
+    sess._store.write_state(state)
+
 
 def _recent_runs(cfg: Config, limit: int = 8) -> list[dict]:
     runs_dir = Path(cfg.log_dir).expanduser()
@@ -560,6 +578,33 @@ async def abandon():
         session._store.write_state(state)
     session.reset()
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/set-objective")
+async def set_objective(objective: str = Form(...)):
+    obj = objective.strip()
+    if obj:
+        session.active_objective = obj
+        _write_objective_state(session)
+    return RedirectResponse("/run", status_code=303)
+
+
+@app.post("/queue-next")
+async def queue_next(objective: str = Form(...)):
+    obj = objective.strip()
+    if obj:
+        session.queued_next_objective = obj
+        _write_objective_state(session)
+    return RedirectResponse("/run", status_code=303)
+
+
+@app.post("/promote-next")
+async def promote_next():
+    if session.queued_next_objective:
+        session.active_objective = session.queued_next_objective
+        session.queued_next_objective = ""
+        _write_objective_state(session)
+    return RedirectResponse("/run", status_code=303)
 
 
 @app.post("/new")

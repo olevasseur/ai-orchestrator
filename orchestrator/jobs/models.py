@@ -65,6 +65,8 @@ class RunState:
     executor_pid: Optional[int] = None
     # Path to executor log (for resume)
     executor_log_path: Optional[str] = None
+    active_objective: str = ""
+    queued_next_objective: str = ""
 
     def touch(self) -> None:
         self.updated_at = datetime.utcnow().isoformat()

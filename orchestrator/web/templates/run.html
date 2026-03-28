@@ -216,6 +216,68 @@
 </div>
 
 
+{# ── Authority card ─────────────────────────────────────────────────────── #}
+{% if session.active_objective or session.task %}
+<div class="bg-slate-800/60 border border-slate-700 rounded-xl p-4 mb-5 space-y-3">
+
+  {# Active objective #}
+  <div>
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Active objective</p>
+    <p class="text-slate-100 text-sm leading-relaxed">{{ session.active_objective or session.task }}</p>
+    {% if session.status not in ('planning', 'executing', 'validating') %}
+    <form action="/set-objective" method="post" class="flex gap-2 mt-2">
+      <input type="text" name="objective" placeholder="Replace active objective…"
+        class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2
+               text-slate-100 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500">
+      <button type="submit"
+        class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-lg text-xs font-medium">
+        Set
+      </button>
+    </form>
+    {% endif %}
+  </div>
+
+  {# Queued next objective #}
+  <div>
+    <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Queued next</p>
+    {% if session.queued_next_objective %}
+    <div class="flex items-start gap-2 mb-2">
+      <p class="text-amber-300 text-xs leading-relaxed flex-1">{{ session.queued_next_objective }}</p>
+      <form action="/promote-next" method="post" class="shrink-0">
+        <button type="submit"
+          class="bg-amber-700 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium">
+          Promote
+        </button>
+      </form>
+    </div>
+    {% else %}
+    <p class="text-slate-600 text-xs italic mb-2">None</p>
+    {% endif %}
+    {% if session.status not in ('planning', 'executing', 'validating') %}
+    <form action="/queue-next" method="post" class="flex gap-2">
+      <input type="text" name="objective" placeholder="Queue next objective…"
+        class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2
+               text-slate-100 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500">
+      <button type="submit"
+        class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-lg text-xs font-medium">
+        Queue
+      </button>
+    </form>
+    {% endif %}
+  </div>
+
+  {# Original task — collapsed #}
+  {% if session.task and session.task != (session.active_objective or session.task) %}
+  <details>
+    <summary class="text-xs text-slate-500 cursor-pointer select-none">Original task</summary>
+    <p class="text-slate-500 text-xs leading-relaxed mt-1">{{ session.task }}</p>
+  </details>
+  {% endif %}
+
+</div>
+{% endif %}
+
+
 {# ══════════════════════════════════════════════════════════════════ #}
 {# AWAITING REVIEW STATE                                             #}
 {# ══════════════════════════════════════════════════════════════════ #}
