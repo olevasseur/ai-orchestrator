@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+import jinja2
 import yaml
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -100,7 +101,15 @@ session = WebSession()
 app = FastAPI(title="Orchestrator", docs_url=None, redoc_url=None)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
-templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+# Construct Jinja2 env manually with cache_size=0 to avoid Python 3.14
+# hashability issue in LRUCache (tuple key containing weakref becomes unhashable
+# when the loader carries state that Python 3.14 refuses to hash).
+_jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(str(_TEMPLATES_DIR)),
+    autoescape=jinja2.select_autoescape(["html"]),
+    cache_size=0,
+)
+templates = Jinja2Templates(env=_jinja_env)
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +248,7 @@ def _memory_ctx(sess: WebSession) -> Optional[dict]:
 async def index(request: Request, error: str = ""):
     cfg = Config.load()
     runs = _recent_runs(cfg)
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "session": session,
         "runs": runs,
         "error": error,
@@ -274,8 +282,7 @@ async def run_page(request: Request):
         return RedirectResponse("/", status_code=303)
     log_tail = _executor_log_tail(session)
     mem = _memory_ctx(session)
-    return templates.TemplateResponse("run.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "run.html", {
         "session": session,
         "log_tail": log_tail,
         "memory": mem,
