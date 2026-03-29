@@ -229,7 +229,12 @@ class OrchestratorRunner:
             self._maybe_refresh_memory(run_state, itr_state.number, sat)
 
             # --- Advance ---
-            itr_state.status = Status.SUCCEEDED
+            # Derive status from actual validation results, not executor prose.
+            # implementation_failure and timeout are definitive code failures.
+            # missing_tool is an environment issue — does not mark code as failed.
+            itr_state.status = OrchestratorRunner._status_from_validation(
+                itr_state.validation_results
+            )
             itr_state.finished_at = datetime.utcnow().isoformat()
             self._save_iteration(itr_state, run_state)
 
@@ -448,3 +453,19 @@ class OrchestratorRunner:
         """Signal a phase transition to an external driver (e.g. web UI)."""
         if self.status_fn is not None:
             self.status_fn(status, iteration)
+
+    @staticmethod
+    def _status_from_validation(val_results: list[dict]) -> str:
+        """Return iteration status derived from recorded validation results.
+
+        implementation_failure and timeout are definitive code failures → FAILED.
+        missing_tool is an environment/dependency issue, not a code failure → does
+        not block SUCCEEDED.  denied/skipped commands are also not code failures.
+        With no validation commands, SUCCEEDED is correct (nothing to contradict it).
+        """
+        if any(
+            r.get("classification") in ("implementation_failure", "timeout")
+            for r in val_results
+        ):
+            return Status.FAILED
+        return Status.SUCCEEDED

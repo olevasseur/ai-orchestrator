@@ -61,6 +61,12 @@
         </p>
         <button class="copy-btn" onclick='copyText({{ itr.executor_stdout_tail | tojson }}, this)'>Copy</button>
       </div>
+      {% if itr.status in ('failed', 'timed_out') %}
+      <p class="text-xs text-amber-500 mb-1">
+        ⚠ Validation had failures — this is Claude Code's unverified prose.
+        The Validation section above is the authoritative record.
+      </p>
+      {% endif %}
       <pre class="log-output text-green-400 text-xs bg-slate-950 rounded px-3 py-3 max-h-64 overflow-y-auto">{{ itr.executor_stdout_tail }}</pre>
     </div>
     {% endif %}
