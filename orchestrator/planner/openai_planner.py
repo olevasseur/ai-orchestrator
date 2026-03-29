@@ -49,7 +49,16 @@ the JSON — with exactly these keys:
 Rules:
 - Keep each iteration small and independently verifiable.
 - The proposed_prompt must be self-contained: include all necessary context.
-- validation_commands should be runnable shell commands (pytest, etc.).
+- The proposed_prompt must NOT ask the executor to run, report on, or summarise
+  validation. Validation is performed externally by the orchestrator using the
+  validation_commands list. Asking the executor to validate produces prose that
+  is not grounded in observed command output and cannot be trusted.
+- validation_commands must each be a single, simple, self-contained shell command
+  that directly proves one condition: e.g. `grep -q 'string' file.py`,
+  `pytest -q tests/test_foo.py`, `test -f path/to/file`, `python -c "import mod"`.
+  Do NOT use compound commands, background processes, curl to local servers, sleep,
+  or anything that requires a service to be already running. Prefer grep/awk on
+  files over runtime HTTP checks.
 - Set done=true only when the whole task is complete and verified.
 - If a previous validation showed missing_tool, address environment setup first.
 """

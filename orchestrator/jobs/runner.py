@@ -29,6 +29,41 @@ from orchestrator.utils.config import Config
 from orchestrator.utils.safety import check_command
 from orchestrator.utils.validation import run_validation_command, ValidationResult
 
+# Patterns that indicate a fragile validation command — ones that require a
+# background service, spawn subprocesses, or depend on timing.  When found,
+# the command is still run but a warning is surfaced so the human reviewer
+# knows the result may be unreliable.
+_FRAGILE_VALIDATION_PATTERNS = [
+    " & ",          # background process
+    "http.server",  # Python HTTP server (needs sleep/curl, race-prone)
+    "uvicorn",      # app server startup
+    "sleep ",       # timing-dependent
+    "curl ",        # runtime HTTP check (requires a running server)
+    "wget ",        # same
+    "http://",      # any HTTP URL
+    "https://",
+]
+
+
+def _warn_fragile_validation_commands(cmds: list[str]) -> list[str]:
+    """Log a warning for validation commands that match known fragile patterns.
+
+    Returns the original list unchanged — commands are still executed.
+    The goal is to surface the risk to the human reviewer, not block execution.
+    """
+    for cmd in cmds:
+        lower = cmd.lower()
+        for pat in _FRAGILE_VALIDATION_PATTERNS:
+            if pat in lower:
+                ui.console.print(
+                    f"  [yellow]⚠  fragile validation command detected "
+                    f"('{pat}' pattern — result may be unreliable):[/yellow]\n"
+                    f"  [dim]{cmd}[/dim]"
+                )
+                break
+    return cmds
+
+
 # Labels and colours per classification, for terminal display
 _CLASS_STYLE = {
     "passed":                 ("[green]✓  passed[/green]",              False),
@@ -305,7 +340,7 @@ class OrchestratorRunner:
 
         ui.console.print("\n[bold]Validation:[/bold]")
 
-        for cmd in itr_state.validation_commands:
+        for cmd in _warn_fragile_validation_commands(itr_state.validation_commands):
             safety = check_command(
                 cmd,
                 self.config.command_allowlist,
