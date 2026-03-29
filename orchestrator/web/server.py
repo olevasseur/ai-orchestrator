@@ -503,6 +503,7 @@ async def stop():
 async def continue_run():
     if session.status != "paused":
         return RedirectResponse("/run", status_code=303)
+    session.current_plan = None   # prevent stale plan leaking into next iteration's /approve
     session.post_iter_decision = "continue"
     session.status = "planning"   # optimistic — runner will call status_fn immediately
     session.post_iter_event.set()
