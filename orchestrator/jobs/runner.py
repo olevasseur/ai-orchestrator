@@ -186,7 +186,12 @@ class OrchestratorRunner:
                     timeout=self.config.executor_timeout,
                     log_stdout_path=str(itr_dir / "executor_stdout.log"),
                     log_stderr_path=str(itr_dir / "executor_stderr.log"),
+                    resume_session_id=run_state.executor_session_id or None,
                 )
+
+                if result.session_id:
+                    run_state.executor_session_id = result.session_id
+                    self.store.write_state(run_state.to_dict())
 
                 ui.show_execution_result(result, itr_n)
 

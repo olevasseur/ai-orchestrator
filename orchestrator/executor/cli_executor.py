@@ -13,6 +13,7 @@ Key design decisions:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -32,13 +33,17 @@ class CLIExecutor(BaseExecutor):
         timeout: int = 600,
         log_stdout_path: str | None = None,
         log_stderr_path: str | None = None,
+        resume_session_id: str | None = None,
     ) -> ExecutionResult:
         cmd = [
             self.claude_cli_path,
-            "--print",          # non-interactive, print output and exit
-            "--dangerously-skip-permissions",  # allow file edits without prompting
-            prompt,
+            "--print",
+            "--dangerously-skip-permissions",
+            "--output-format", "stream-json",
         ]
+        if resume_session_id:
+            cmd += ["--resume", resume_session_id]
+        cmd.append(prompt)
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
@@ -88,11 +93,29 @@ class CLIExecutor(BaseExecutor):
             if stderr_file:
                 stderr_file.close()
 
+        # Parse stream-json output: scan lines in reverse for the result event.
+        raw_stdout = "".join(stdout_lines)
+        result_text = raw_stdout
+        session_id = ""
+        for line in reversed(stdout_lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "result":
+                    session_id = event.get("session_id", "")
+                    result_text = event.get("result", raw_stdout)
+                    break
+            except json.JSONDecodeError:
+                continue
+
         return ExecutionResult(
-            stdout="".join(stdout_lines),
+            stdout=result_text,
             stderr="".join(stderr_lines),
             exit_code=exit_code,
             timed_out=timed_out,
+            session_id=session_id,
         )
 
 
@@ -109,6 +132,7 @@ class DemoExecutor(BaseExecutor):
         timeout: int = 600,
         log_stdout_path: str | None = None,
         log_stderr_path: str | None = None,
+        resume_session_id: str | None = None,
     ) -> ExecutionResult:
         output = (
             "[DEMO] Claude Code would execute the following prompt:\n\n"

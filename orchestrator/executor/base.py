@@ -12,6 +12,7 @@ class ExecutionResult:
     stderr: str
     exit_code: int
     timed_out: bool = False
+    session_id: str = ""
 
 
 class BaseExecutor(ABC):
@@ -30,6 +31,7 @@ class BaseExecutor(ABC):
         timeout: int = 600,
         log_stdout_path: str | None = None,
         log_stderr_path: str | None = None,
+        resume_session_id: str | None = None,
     ) -> ExecutionResult:
         """Execute the prompt against the repo and return results."""
         ...

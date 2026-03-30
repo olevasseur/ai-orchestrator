@@ -67,6 +67,7 @@ class RunState:
     executor_log_path: Optional[str] = None
     active_objective: str = ""
     queued_next_objective: str = ""
+    executor_session_id: str = ""
 
     def touch(self) -> None:
         self.updated_at = datetime.utcnow().isoformat()
