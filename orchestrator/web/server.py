@@ -32,6 +32,7 @@ from orchestrator.executor.cli_executor import make_executor
 from orchestrator.jobs.models import RunState, Status
 from orchestrator.jobs.runner import OrchestratorRunner
 from orchestrator.memory.manager import MemoryManager
+from orchestrator.planner.direct_planner import DirectPlanner
 from orchestrator.planner.openai_planner import OpenAIPlanner
 from orchestrator.storage.store import RunStore
 from orchestrator.utils.config import Config
@@ -240,9 +241,19 @@ def _run_in_thread(sess: WebSession, runner: OrchestratorRunner) -> None:
         sess.review_event.set()
 
 
-def _launch_runner(sess: WebSession, repo_path: str, task: str, cfg: Config) -> None:
+def _launch_runner(
+    sess: WebSession,
+    repo_path: str,
+    task: str,
+    cfg: Config,
+    *,
+    use_prompt_directly: bool = False,
+) -> None:
     """Create runner + store, write initial state, start background thread."""
-    planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
+    if use_prompt_directly:
+        planner: OpenAIPlanner | DirectPlanner = DirectPlanner()
+    else:
+        planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
     executor = make_executor(cfg.executor_mode, cfg.claude_cli_path)
 
     store = RunStore.create(cfg.log_dir, repo_path)
@@ -441,6 +452,7 @@ async def index(request: Request, error: str = ""):
 async def start(
     repo_path: str = Form(...),
     task: str = Form(...),
+    use_prompt_directly: bool = Form(default=False),
 ):
     if session.is_busy():
         return RedirectResponse("/run", status_code=303)
@@ -453,11 +465,11 @@ async def start(
         return RedirectResponse(f"/?error=Repo+not+found:+{repo_path}", status_code=303)
 
     cfg = Config.load()
-    if not cfg.openai_api_key:
+    if not use_prompt_directly and not cfg.openai_api_key:
         return RedirectResponse("/?error=OPENAI_API_KEY+not+set+in+.env", status_code=303)
 
     session.reset()
-    _launch_runner(session, str(repo), task.strip(), cfg)
+    _launch_runner(session, str(repo), task.strip(), cfg, use_prompt_directly=use_prompt_directly)
     return RedirectResponse("/run", status_code=303)
 
 
