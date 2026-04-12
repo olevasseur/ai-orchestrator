@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from tiny_loop.claude_runner import run_claude
-from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff
+from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff, head_commit, files_changed_since
 from tiny_loop.prompts import build_initial_prompt, build_continuation_prompt
 from tiny_loop.reviewer import build_reviewer_packet, call_reviewer, call_initial_planner
 from tiny_loop.state import new_run_state, new_iteration_record, save_state
@@ -93,6 +93,7 @@ def run(
     print()
 
     session_id: str | None = None
+    start_commit = head_commit(repo)
 
     # --- Initial planning: ask OpenAI for a bounded iteration-1 step ---
     ctx = repo_context(repo)
@@ -274,12 +275,23 @@ def run(
 
     summary_path = out / "summary.md"
 
+    # Collect files changed during the sprint
+    changed_files = files_changed_since(repo, start_commit) if start_commit else []
+    state["files_changed"] = changed_files
+    save_state(state, state_path)
+
     print(f"\n{'=' * 50}")
     print(f"Run complete.")
     print(f"  Status:  {state['status']}")
     print(f"  Run dir: {out}")
     print(f"  State:   {state_path}")
     print(f"  Summary: {summary_path}")
+    if changed_files:
+        print(f"\n  Files changed during sprint ({len(changed_files)}):")
+        for f in changed_files:
+            print(f"    {f}")
+    else:
+        print(f"\n  No files changed during sprint.")
     print(f"{'=' * 50}")
     return state
 
@@ -332,6 +344,23 @@ def _write_summary(state: dict, path: Path) -> None:
             itr["claude_output"][:3000],
             f"```",
             f"</details>",
+            f"",
+        ])
+
+    changed = state.get("files_changed", [])
+    if changed:
+        lines.extend([
+            f"## Files changed ({len(changed)})",
+            f"",
+        ])
+        for f in changed:
+            lines.append(f"- `{f}`")
+        lines.append("")
+    else:
+        lines.extend([
+            f"## Files changed",
+            f"",
+            f"No files changed during sprint.",
             f"",
         ])
 

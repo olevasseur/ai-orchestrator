@@ -52,6 +52,28 @@ def diff_summary(repo_path: str) -> str:
     return diff or "(no changes)"
 
 
+def head_commit(repo_path: str) -> str:
+    """Return the current HEAD commit hash."""
+    cwd = str(Path(repo_path).resolve())
+    return _run(["git", "rev-parse", "HEAD"], cwd)
+
+
+def files_changed_since(repo_path: str, since_commit: str) -> list[str]:
+    """Return list of files changed (added/modified) since a given commit."""
+    cwd = str(Path(repo_path).resolve())
+    # Committed changes
+    out = _run(["git", "diff", "--name-only", since_commit, "HEAD"], cwd)
+    files = [f for f in out.splitlines() if f.strip()] if out else []
+    # Also include uncommitted changes (staged + unstaged)
+    wt = _run(["git", "diff", "--name-only", "HEAD"], cwd)
+    if wt:
+        for f in wt.splitlines():
+            f = f.strip()
+            if f and f not in files:
+                files.append(f)
+    return sorted(files)
+
+
 def has_meaningful_diff(repo_path: str) -> bool:
     """Return True if there are any actual code changes (staged or unstaged)."""
     cwd = str(Path(repo_path).resolve())
