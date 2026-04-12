@@ -231,14 +231,27 @@
     <p class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1">Active objective</p>
     <p class="text-slate-100 text-sm leading-relaxed">{{ session.active_objective or session.task }}</p>
     {% if session.status not in ('planning', 'executing', 'validating') %}
-    <form action="/set-objective" method="post" class="flex gap-2 mt-2">
-      <input type="text" name="objective" placeholder="Replace active objective…"
-        class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2
-               text-slate-100 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500">
-      <button type="submit"
-        class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-lg text-xs font-medium">
-        Set
-      </button>
+    <form action="/set-objective" method="post" class="mt-2 space-y-1">
+      <div class="flex gap-2">
+        <input type="text" name="objective" placeholder="Replace active objective…"
+          class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2
+                 text-slate-100 text-xs placeholder-slate-500 focus:outline-none focus:border-blue-500">
+        <button type="submit"
+          class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-lg text-xs font-medium">
+          Set
+        </button>
+      </div>
+      <div class="flex items-center gap-2 mt-2">
+        <input type="checkbox" id="set_obj_direct" name="use_prompt_directly" value="true"
+          class="w-4 h-4 rounded border-slate-600 bg-slate-800 accent-blue-500"
+          onchange="document.getElementById('set_obj_direct_hint').classList.toggle('hidden', !this.checked)">
+        <label for="set_obj_direct" class="text-xs text-slate-400 select-none cursor-pointer">
+          Use prompt directly (skip planner)
+        </label>
+      </div>
+      <p id="set_obj_direct_hint" class="text-xs text-amber-400 mt-1 hidden">
+        &#9888; The objective text will be sent to the executor as written. Edit the prompt in the review step before approving.
+      </p>
     </form>
     {% endif %}
   </div>

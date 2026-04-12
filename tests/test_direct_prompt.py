@@ -105,3 +105,51 @@ class TestDirectPromptServerFlag:
         finally:
             if original is not None:
                 os.environ["OPENAI_API_KEY"] = original
+
+
+class TestSetObjectivePlannerSwap:
+    """Verify that POST /set-objective swaps session._planner based on the checkbox."""
+
+    def setup_method(self):
+        from orchestrator.web import server
+        server.session.reset()
+        # Give the session a non-idle status so /run redirect is reachable.
+        server.session.status = "paused"
+
+    def teardown_method(self):
+        from orchestrator.web import server
+        server.session.reset()
+
+    def test_set_objective_with_flag_installs_direct_planner(self):
+        """use_prompt_directly=true must replace session._planner with DirectPlanner."""
+        from fastapi.testclient import TestClient
+        from orchestrator.planner.direct_planner import DirectPlanner
+        from orchestrator.web.server import app, session
+
+        client = TestClient(app, raise_server_exceptions=True)
+        client.post(
+            "/set-objective",
+            data={"objective": "do something", "use_prompt_directly": "true"},
+            follow_redirects=False,
+        )
+        assert isinstance(session._planner, DirectPlanner)
+
+    def test_set_objective_without_flag_installs_openai_planner(self, monkeypatch):
+        """Omitting use_prompt_directly must replace session._planner with OpenAIPlanner."""
+        from unittest.mock import MagicMock
+        from fastapi.testclient import TestClient
+        from orchestrator.planner.openai_planner import OpenAIPlanner
+        from orchestrator.web import server
+
+        fake_cfg = MagicMock()
+        fake_cfg.openai_api_key = "sk-test"
+        fake_cfg.openai_model = "gpt-4o"
+        monkeypatch.setattr(server, "Config", MagicMock(load=MagicMock(return_value=fake_cfg)))
+
+        client = TestClient(server.app, raise_server_exceptions=True)
+        client.post(
+            "/set-objective",
+            data={"objective": "do something else"},
+            follow_redirects=False,
+        )
+        assert isinstance(server.session._planner, OpenAIPlanner)

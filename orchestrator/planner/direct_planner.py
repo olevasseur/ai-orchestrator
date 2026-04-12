@@ -37,3 +37,7 @@ class DirectPlanner:
             "[Planner bypassed — no AI assistant available for questions "
             "in direct-prompt mode.]"
         )
+
+    def compress_memory(self, working_memory: str, project_memory: str) -> str:
+        """No-op: memory compression requires an LLM; return working memory unchanged."""
+        return working_memory

@@ -594,11 +594,19 @@ async def abandon():
 
 
 @app.post("/set-objective")
-async def set_objective(objective: str = Form(...)):
+async def set_objective(
+    objective: str = Form(...),
+    use_prompt_directly: bool = Form(default=False),
+):
     obj = objective.strip()
     if obj:
         session.active_objective = obj
         _write_objective_state(session)
+    cfg = Config.load()
+    if use_prompt_directly:
+        session._planner = DirectPlanner()
+    else:
+        session._planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
     return RedirectResponse("/run", status_code=303)
 
 
