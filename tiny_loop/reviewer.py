@@ -1,9 +1,14 @@
-"""OpenAI reviewer: evaluates Claude's iteration output and decides next step."""
+"""OpenAI reviewer: evaluates Claude's iteration output and decides next step.
+
+Uses the OpenAI Responses API with previous_response_id chaining so that
+a single sprint maintains conversational continuity across the initial
+planner call and all subsequent reviewer calls.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any
 
 from openai import OpenAI
@@ -90,6 +95,8 @@ class ReviewerDecision:
     next_prompt_for_claude: str | None
     risk_flags: list[str]
     completion_assessment: str
+    response_id: str = ""
+    conversation_id: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -110,6 +117,7 @@ def build_reviewer_packet(
 
     # Surface abnormal execution prominently at the top
     if abnormal_execution:
+        step_type = abnormal_execution.get("step_type", "implementation")
         warning_lines = ["\n## ⚠ ABNORMAL EXECUTION WARNING"]
         if abnormal_execution.get("timed_out"):
             warning_lines.append(
@@ -122,6 +130,9 @@ def build_reviewer_packet(
         warning_lines.append(
             f"Output is likely INCOMPLETE or PARTIAL."
         )
+        warning_lines.append(
+            f"Step type: {step_type}"
+        )
         has_diff = abnormal_execution.get("has_meaningful_diff", False)
         warning_lines.append(
             f"Meaningful code changes: {'YES — review diff carefully' if has_diff else 'NONE'}"
@@ -130,10 +141,26 @@ def build_reviewer_packet(
             warning_lines.append(
                 "This was already retried once with the same step and still failed."
             )
-        warning_lines.append(
-            "Consider whether this step should be simplified, "
-            "or whether this is a stop_failure / pause_for_human situation."
-        )
+
+        # Give step-type-aware guidance
+        if step_type in ("validation", "packaging"):
+            warning_lines.append(
+                "\nIMPORTANT: This was a VALIDATION/PACKAGING step, not an implementation step."
+            )
+            warning_lines.append(
+                "If prior iterations successfully implemented and tested the feature, "
+                "this failure likely does NOT mean the sprint failed."
+            )
+            warning_lines.append(
+                "Review prior iteration assessments. If implementation and tests are "
+                "complete, prefer stop_success over pause_for_human. Only pause if "
+                "you genuinely cannot determine whether the sprint objective was met."
+            )
+        else:
+            warning_lines.append(
+                "Consider whether this step should be simplified, "
+                "or whether this is a stop_failure / pause_for_human situation."
+            )
         parts.append("\n".join(warning_lines))
 
     parts.append(f"\n## Sprint objective\n{objective}")
@@ -164,25 +191,39 @@ def build_reviewer_packet(
     return "\n".join(parts)
 
 
+def _extract_json_text(response) -> str:
+    """Extract the text content from a Responses API response."""
+    for item in response.output:
+        if item.type == "message":
+            for content in item.content:
+                if content.type == "output_text":
+                    return content.text
+    return "{}"
+
+
 def call_reviewer(
     api_key: str,
     model: str,
     reviewer_packet: str,
+    previous_response_id: str | None = None,
 ) -> ReviewerDecision:
-    """Call OpenAI to review the iteration and return a structured decision."""
+    """Call OpenAI to review the iteration and return a structured decision.
+
+    Uses the Responses API with previous_response_id for sprint continuity.
+    """
     client = OpenAI(api_key=api_key)
 
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model=model,
-        messages=[
-            {"role": "system", "content": REVIEWER_SYSTEM_PROMPT},
-            {"role": "user", "content": reviewer_packet},
-        ],
-        response_format={"type": "json_object"},
+        instructions=REVIEWER_SYSTEM_PROMPT,
+        input=reviewer_packet,
+        previous_response_id=previous_response_id,
+        text={"format": {"type": "json_object"}},
         temperature=0.2,
+        store=True,
     )
 
-    raw = response.choices[0].message.content or "{}"
+    raw = _extract_json_text(response)
     data = json.loads(raw)
 
     return ReviewerDecision(
@@ -191,6 +232,8 @@ def call_reviewer(
         next_prompt_for_claude=data.get("next_prompt_for_claude"),
         risk_flags=data.get("risk_flags", []),
         completion_assessment=data.get("completion_assessment", ""),
+        response_id=response.id,
+        conversation_id=response.conversation.id if response.conversation else "",
     )
 
 
@@ -199,6 +242,8 @@ class PlannerResult:
     iteration_1_prompt: str
     rationale: str
     expected_remaining_steps: str
+    response_id: str = ""
+    conversation_id: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -211,27 +256,32 @@ def call_initial_planner(
     repo_ctx: str,
     max_iterations: int,
 ) -> PlannerResult:
-    """Ask OpenAI to decompose the sprint brief into a bounded first step."""
+    """Ask OpenAI to decompose the sprint brief into a bounded first step.
+
+    This is the first call in the sprint's response chain. Its response_id
+    is used as the root for subsequent reviewer calls via previous_response_id.
+    """
     client = OpenAI(api_key=api_key)
 
-    system = INITIAL_PLANNER_SYSTEM_PROMPT.format(max_iterations=max_iterations)
+    instructions = INITIAL_PLANNER_SYSTEM_PROMPT.format(max_iterations=max_iterations)
     user_msg = f"## Sprint brief\n{objective}\n\n## Repository context\n{repo_ctx}"
 
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg},
-        ],
-        response_format={"type": "json_object"},
+        instructions=instructions,
+        input=user_msg,
+        text={"format": {"type": "json_object"}},
         temperature=0.2,
+        store=True,
     )
 
-    raw = response.choices[0].message.content or "{}"
+    raw = _extract_json_text(response)
     data = json.loads(raw)
 
     return PlannerResult(
         iteration_1_prompt=data.get("iteration_1_prompt", objective),
         rationale=data.get("rationale", ""),
         expected_remaining_steps=data.get("expected_remaining_steps", ""),
+        response_id=response.id,
+        conversation_id=response.conversation.id if response.conversation else "",
     )

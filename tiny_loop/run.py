@@ -26,6 +26,38 @@ from tiny_loop.state import new_run_state, new_iteration_record, save_state
 
 TERMINAL_DECISIONS = {"pause_for_human", "stop_success", "stop_failure"}
 
+# Keywords used to classify iteration steps by type.
+_VALIDATION_KEYWORDS = [
+    "validate", "validation", "verify", "confirm", "check that",
+    "run the full", "run pytest", "full test suite", "full suite",
+    "smoke test", "smoke command", "scope check", "git diff --stat",
+    "ensure everything", "ensure all tests",
+]
+_PACKAGING_KEYWORDS = [
+    "package", "packaging", "handoff", "artifact", "summary",
+    "capture output", "before/after",
+]
+_TEST_KEYWORDS = [
+    "add test", "add focused test", "add targeted test", "add unit test",
+    "write test", "create test", "test coverage", "tests for",
+]
+
+
+def classify_step(step_text: str) -> str:
+    """Classify a step as 'implementation', 'tests', 'validation', or 'packaging'.
+
+    Uses simple keyword matching on the step prompt. Checked in order of
+    specificity: packaging > validation > tests > implementation (default).
+    """
+    lower = step_text.lower()
+    if any(kw in lower for kw in _PACKAGING_KEYWORDS):
+        return "packaging"
+    if any(kw in lower for kw in _VALIDATION_KEYWORDS):
+        return "validation"
+    if any(kw in lower for kw in _TEST_KEYWORDS):
+        return "tests"
+    return "implementation"
+
 
 def run(
     repo_path: str,
@@ -67,9 +99,21 @@ def run(
     print("Planning iteration 1...")
     initial_plan = call_initial_planner(api_key, openai_model, objective, ctx, max_iterations)
     state["initial_plan"] = initial_plan.to_dict()
+
+    # Track OpenAI response chain for sprint continuity
+    openai_response_id: str | None = initial_plan.response_id or None
+    state["openai_thread"] = {
+        "conversation_id": initial_plan.conversation_id,
+        "planner_response_id": initial_plan.response_id,
+        "latest_response_id": initial_plan.response_id,
+        "response_ids": [initial_plan.response_id] if initial_plan.response_id else [],
+    }
+
     save_state(state, state_path)
     print(f"  Step: {initial_plan.iteration_1_prompt[:120]}{'...' if len(initial_plan.iteration_1_prompt) > 120 else ''}")
     print(f"  Rationale: {initial_plan.rationale}")
+    if initial_plan.response_id:
+        print(f"  OpenAI response: {initial_plan.response_id}")
     print()
 
     for i in range(max_iterations):
@@ -88,7 +132,11 @@ def run(
                 objective, current_step, state["iterations"]
             )
 
-        # 2. Run Claude
+        # 2. Classify step type
+        step_type = classify_step(current_step)
+        print(f"  Step type: {step_type}")
+
+        # 3. Run Claude
         print("  Running Claude...")
         result = run_claude(
             prompt, repo, timeout=claude_timeout, resume_session_id=session_id
@@ -105,10 +153,19 @@ def run(
         else:
             print(f"  Claude completed (exit 0)")
 
-        # 2b. Retry once if abnormal + no meaningful diff
+        # 3b. Retry policy — depends on step type
+        # Implementation/tests: retry only if abnormal + no diff (existing behavior)
+        # Validation/packaging: always retry on abnormal (these steps are low-risk)
         retried = False
-        if abnormal and not has_diff:
-            print("  No meaningful diff — retrying same step once...")
+        should_retry = False
+        if abnormal:
+            if step_type in ("validation", "packaging"):
+                should_retry = True  # always worth retrying non-code steps
+            elif not has_diff:
+                should_retry = True  # no code produced — safe to retry
+
+        if should_retry:
+            print(f"  {'Validation/packaging' if step_type in ('validation', 'packaging') else 'No meaningful diff'} — retrying same step once...")
             retried = True
             result = run_claude(
                 prompt, repo, timeout=claude_timeout, resume_session_id=session_id
@@ -128,7 +185,7 @@ def run(
         # 3. Capture git diff
         diff = diff_summary(repo)
 
-        # 4. Build abnormal execution context if needed
+        # 5. Build abnormal execution context if needed
         abnormal_execution = None
         if abnormal:
             abnormal_execution = {
@@ -137,6 +194,7 @@ def run(
                 "timeout_seconds": claude_timeout,
                 "has_meaningful_diff": has_diff,
                 "was_retried": retried,
+                "step_type": step_type,
             }
 
         # 5. Build reviewer packet and call OpenAI
@@ -152,7 +210,20 @@ def run(
             abnormal_execution=abnormal_execution,
         )
 
-        decision = call_reviewer(api_key, openai_model, packet)
+        decision = call_reviewer(
+            api_key, openai_model, packet,
+            previous_response_id=openai_response_id,
+        )
+
+        # Update response chain
+        if decision.response_id:
+            openai_response_id = decision.response_id
+            thread = state["openai_thread"]
+            thread["latest_response_id"] = decision.response_id
+            thread["response_ids"].append(decision.response_id)
+            if decision.conversation_id:
+                thread["conversation_id"] = decision.conversation_id
+
         print(f"  Decision: {decision.decision}")
         print(f"  Rationale: {decision.rationale}")
         if decision.risk_flags:
@@ -172,6 +243,8 @@ def run(
         )
         record["abnormal_execution"] = abnormal_execution
         record["was_retried"] = retried
+        record["step_type"] = step_type
+        record["openai_response_id"] = decision.response_id
         state["iterations"].append(record)
         save_state(state, state_path)
 
