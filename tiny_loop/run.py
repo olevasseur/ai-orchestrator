@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from tiny_loop.claude_runner import run_claude
-from tiny_loop.git_helpers import repo_context, diff_summary
+from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff
 from tiny_loop.prompts import build_initial_prompt, build_continuation_prompt
 from tiny_loop.reviewer import build_reviewer_packet, call_reviewer, call_initial_planner
 from tiny_loop.state import new_run_state, new_iteration_record, save_state
@@ -79,12 +79,13 @@ def run(
 
         # 1. Build the Claude prompt
         if itr_num == 1:
-            prompt = build_initial_prompt(initial_plan.iteration_1_prompt, ctx)
+            current_step = initial_plan.iteration_1_prompt
+            prompt = build_initial_prompt(current_step, ctx)
         else:
             last_decision = state["iterations"][-1]["reviewer_decision"]
-            next_step = last_decision.get("next_prompt_for_claude") or objective
+            current_step = last_decision.get("next_prompt_for_claude") or objective
             prompt = build_continuation_prompt(
-                objective, next_step, state["iterations"]
+                objective, current_step, state["iterations"]
             )
 
         # 2. Run Claude
@@ -94,6 +95,9 @@ def run(
         )
         session_id = result.session_id or session_id
 
+        abnormal = result.timed_out or result.exit_code != 0
+        has_diff = has_meaningful_diff(repo) if abnormal else True
+
         if result.timed_out:
             print(f"  Claude timed out (>{claude_timeout}s)")
         elif result.exit_code != 0:
@@ -101,10 +105,41 @@ def run(
         else:
             print(f"  Claude completed (exit 0)")
 
+        # 2b. Retry once if abnormal + no meaningful diff
+        retried = False
+        if abnormal and not has_diff:
+            print("  No meaningful diff — retrying same step once...")
+            retried = True
+            result = run_claude(
+                prompt, repo, timeout=claude_timeout, resume_session_id=session_id
+            )
+            session_id = result.session_id or session_id
+
+            abnormal = result.timed_out or result.exit_code != 0
+            has_diff = has_meaningful_diff(repo) if abnormal else True
+
+            if result.timed_out:
+                print(f"  Retry timed out (>{claude_timeout}s)")
+            elif result.exit_code != 0:
+                print(f"  Retry exited with code {result.exit_code}")
+            else:
+                print(f"  Retry completed (exit 0)")
+
         # 3. Capture git diff
         diff = diff_summary(repo)
 
-        # 4. Build reviewer packet and call OpenAI
+        # 4. Build abnormal execution context if needed
+        abnormal_execution = None
+        if abnormal:
+            abnormal_execution = {
+                "timed_out": result.timed_out,
+                "exit_code": result.exit_code,
+                "timeout_seconds": claude_timeout,
+                "has_meaningful_diff": has_diff,
+                "was_retried": retried,
+            }
+
+        # 5. Build reviewer packet and call OpenAI
         print("  Calling reviewer...")
         packet = build_reviewer_packet(
             objective=objective,
@@ -113,6 +148,8 @@ def run(
             claude_output=result.stdout,
             git_diff=diff,
             previous_summaries=state["iterations"],
+            current_step=current_step,
+            abnormal_execution=abnormal_execution,
         )
 
         decision = call_reviewer(api_key, openai_model, packet)
@@ -121,7 +158,7 @@ def run(
         if decision.risk_flags:
             print(f"  Risks: {', '.join(decision.risk_flags)}")
 
-        # 5. Record iteration
+        # 6. Record iteration
         record = new_iteration_record(
             iteration=itr_num,
             prompt=prompt,
@@ -133,6 +170,8 @@ def run(
             reviewer_packet=packet,
             reviewer_decision=decision.to_dict(),
         )
+        record["abnormal_execution"] = abnormal_execution
+        record["was_retried"] = retried
         state["iterations"].append(record)
         save_state(state, state_path)
 

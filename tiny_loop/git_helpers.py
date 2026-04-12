@@ -50,3 +50,13 @@ def diff_summary(repo_path: str) -> str:
     if not diff:
         diff = _run(["git", "diff"], cwd)
     return diff or "(no changes)"
+
+
+def has_meaningful_diff(repo_path: str) -> bool:
+    """Return True if there are any actual code changes (staged or unstaged)."""
+    cwd = str(Path(repo_path).resolve())
+    # --stat is cheaper than full diff for a boolean check
+    stat = _run(["git", "diff", "--stat", "HEAD"], cwd)
+    if not stat:
+        stat = _run(["git", "diff", "--stat"], cwd)
+    return bool(stat)

@@ -35,19 +35,42 @@ Respond with a JSON object with exactly these keys:
 
 
 REVIEWER_SYSTEM_PROMPT = """\
-You are a conservative code reviewer embedded in a bounded automation loop.
+You are a code reviewer and iteration planner in a bounded automation loop.
 
-A coding agent (Claude) is implementing a task iteratively. After each iteration
-you receive Claude's output, a git diff of changes, and the overall task objective.
-Your job is to decide what happens next.
+A coding agent (Claude) is implementing a sprint objective iteratively. Each
+iteration has a specific bounded step. You receive the step that was assigned,
+Claude's output, a git diff, and the overall sprint objective.
 
-Rules:
-- Be conservative. If something looks wrong or unclear, pause for human review.
-- If the task appears complete and validated, stop with success.
-- If Claude failed or is stuck in a loop, stop with failure.
-- If continuing, provide ONLY the next narrow implementation step — not a broad plan.
-- Never expand scope beyond the original objective.
-- The loop has a hard cap of 5 iterations total, so be efficient.
+Your job: decide what happens next.
+
+Decision policy (follow in order):
+
+1. stop_failure — Claude crashed, timed out, produced no useful changes, or is
+   stuck repeating the same failed approach.
+
+2. stop_success — The ENTIRE sprint objective is satisfied and validated. Every
+   part of the objective has been implemented and tested. Do not stop with
+   success if clearly scoped sub-parts remain unimplemented.
+
+3. continue — The current iteration's step was completed (even partially), the
+   overall sprint still has clearly in-scope work remaining, and you can identify
+   a concrete next step. THIS IS THE DEFAULT when progress was made and the
+   sprint is not yet fully done. A successful bounded step with remaining work
+   is a normal continue, not a reason to pause.
+
+4. pause_for_human — Reserve this for genuinely ambiguous, risky, or blocked
+   situations:
+   - Test failures or regressions that are not obviously fixable
+   - Contradictory requirements discovered
+   - Scope ambiguity that cannot be resolved from the sprint brief
+   - The next step requires changes outside the stated file/scope boundaries
+   Do NOT pause simply because the sprint is partially complete, the diff was
+   truncated, or you are uncertain whether unrelated code was affected. Partial
+   completion with clear remaining work is a continue, not a pause.
+
+When continuing, provide ONLY the next narrow implementation step — not a broad
+plan. Never expand scope beyond the original objective. The loop has a hard cap
+on iterations, so be efficient.
 
 Respond with a JSON object with exactly these keys:
 {
@@ -79,10 +102,45 @@ def build_reviewer_packet(
     claude_output: str,
     git_diff: str,
     previous_summaries: list[dict],
+    current_step: str = "",
+    abnormal_execution: dict | None = None,
 ) -> str:
     """Build the user message for the reviewer."""
-    parts = [f"## Objective\n{objective}"]
+    parts = []
+
+    # Surface abnormal execution prominently at the top
+    if abnormal_execution:
+        warning_lines = ["\n## ⚠ ABNORMAL EXECUTION WARNING"]
+        if abnormal_execution.get("timed_out"):
+            warning_lines.append(
+                f"Claude TIMED OUT after {abnormal_execution.get('timeout_seconds', '?')} seconds."
+            )
+        elif abnormal_execution.get("exit_code", 0) != 0:
+            warning_lines.append(
+                f"Claude exited with NON-ZERO exit code {abnormal_execution['exit_code']}."
+            )
+        warning_lines.append(
+            f"Output is likely INCOMPLETE or PARTIAL."
+        )
+        has_diff = abnormal_execution.get("has_meaningful_diff", False)
+        warning_lines.append(
+            f"Meaningful code changes: {'YES — review diff carefully' if has_diff else 'NONE'}"
+        )
+        if abnormal_execution.get("was_retried"):
+            warning_lines.append(
+                "This was already retried once with the same step and still failed."
+            )
+        warning_lines.append(
+            "Consider whether this step should be simplified, "
+            "or whether this is a stop_failure / pause_for_human situation."
+        )
+        parts.append("\n".join(warning_lines))
+
+    parts.append(f"\n## Sprint objective\n{objective}")
     parts.append(f"\n## Iteration {iteration_number} of {max_iterations}")
+
+    if current_step:
+        parts.append(f"\n## This iteration's assigned step\n{current_step}")
 
     if previous_summaries:
         summary_text = "\n".join(
