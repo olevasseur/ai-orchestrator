@@ -95,6 +95,9 @@ def run(
     session_id: str | None = None
     start_commit = head_commit(repo)
 
+    # Snapshot /tmp top-level entries before the sprint so we can detect new artifacts
+    tmp_before = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
+
     # --- Initial planning: ask OpenAI for a bounded iteration-1 step ---
     ctx = repo_context(repo)
     print("Planning iteration 1...")
@@ -275,9 +278,30 @@ def run(
 
     summary_path = out / "summary.md"
 
-    # Collect files changed during the sprint
+    # Collect repo files changed during the sprint (for state record)
     changed_files = files_changed_since(repo, start_commit) if start_commit else []
     state["files_changed"] = changed_files
+
+    # Collect all sprint artifacts:
+    # 1. Harness output directory (state.json, summary.md)
+    harness_artifacts = sorted(str(p) for p in out.rglob("*") if p.is_file())
+
+    # 2. New /tmp entries created during the sprint (Claude's evidence dirs/files)
+    tmp_after = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
+    new_tmp_entries = sorted(str(p) for p in (tmp_after - tmp_before) if p != out)
+    # Expand directories to list their contents
+    external_artifacts = []
+    for entry in new_tmp_entries:
+        p = Path(entry)
+        if p.is_file():
+            external_artifacts.append(str(p))
+        elif p.is_dir():
+            for f in sorted(p.rglob("*")):
+                if f.is_file():
+                    external_artifacts.append(str(f))
+
+    all_artifacts = harness_artifacts + external_artifacts
+    state["artifacts"] = all_artifacts
     save_state(state, state_path)
 
     print(f"\n{'=' * 50}")
@@ -286,12 +310,10 @@ def run(
     print(f"  Run dir: {out}")
     print(f"  State:   {state_path}")
     print(f"  Summary: {summary_path}")
-    if changed_files:
-        print(f"\n  Files changed during sprint ({len(changed_files)}):")
-        for f in changed_files:
+    if all_artifacts:
+        print(f"\n  Sprint artifacts ({len(all_artifacts)}):")
+        for f in all_artifacts:
             print(f"    {f}")
-    else:
-        print(f"\n  No files changed during sprint.")
     print(f"{'=' * 50}")
     return state
 
@@ -350,19 +372,22 @@ def _write_summary(state: dict, path: Path) -> None:
     changed = state.get("files_changed", [])
     if changed:
         lines.extend([
-            f"## Files changed ({len(changed)})",
+            f"## Repo files changed ({len(changed)})",
             f"",
         ])
         for f in changed:
             lines.append(f"- `{f}`")
         lines.append("")
-    else:
+
+    artifacts = state.get("artifacts", [])
+    if artifacts:
         lines.extend([
-            f"## Files changed",
-            f"",
-            f"No files changed during sprint.",
+            f"## Sprint artifacts to upload ({len(artifacts)})",
             f"",
         ])
+        for f in artifacts:
+            lines.append(f"- `{f}`")
+        lines.append("")
 
     path.write_text("\n".join(lines))
 
