@@ -7,6 +7,7 @@ Flattened: no ABC, no factory, no demo mode — just the function.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from dataclasses import dataclass, asdict
@@ -39,6 +40,12 @@ def run_claude(
         "--verbose",
         "--output-format", "stream-json",
     ]
+    model = os.environ.get("CLAUDE_MODEL")
+    if model:
+        cmd += ["--model", model]
+    effort = os.environ.get("CLAUDE_EFFORT")
+    if effort:
+        cmd += ["--effort", effort]
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
     cmd.append(prompt)
