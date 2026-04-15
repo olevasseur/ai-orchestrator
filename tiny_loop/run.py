@@ -17,6 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from tiny_loop.artifacts import package_artifacts
 from tiny_loop.claude_runner import run_claude
 from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff, head_commit, files_changed_since
 from tiny_loop.prompts import build_initial_prompt, build_continuation_prompt
@@ -281,6 +282,10 @@ def run(
     # Collect repo files changed during the sprint (for state record)
     changed_files = files_changed_since(repo, start_commit) if start_commit else []
     state["files_changed"] = changed_files
+
+    # Post-run packaging: generate harness-owned artifacts
+    print("\n  Packaging artifacts...")
+    package_artifacts(repo, out, start_commit, state)
 
     # Collect all sprint artifacts:
     # 1. Harness output directory (state.json, summary.md)
