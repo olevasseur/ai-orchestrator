@@ -129,12 +129,12 @@ def run(
         # 1. Build the Claude prompt
         if itr_num == 1:
             current_step = initial_plan.iteration_1_prompt
-            prompt = build_initial_prompt(current_step, ctx)
+            prompt = build_initial_prompt(current_step, ctx, json_mode=True)
         else:
             last_decision = state["iterations"][-1]["reviewer_decision"]
             current_step = last_decision.get("next_prompt_for_claude") or objective
             prompt = build_continuation_prompt(
-                objective, current_step, state["iterations"]
+                objective, current_step, state["iterations"], json_mode=True
             )
 
         # 2. Classify step type
@@ -213,6 +213,7 @@ def run(
             previous_summaries=state["iterations"],
             current_step=current_step,
             abnormal_execution=abnormal_execution,
+            json_mode=True,
         )
 
         decision = call_reviewer(

@@ -111,8 +111,17 @@ def build_reviewer_packet(
     previous_summaries: list[dict],
     current_step: str = "",
     abnormal_execution: dict | None = None,
+    *,
+    json_mode: bool = False,
 ) -> str:
-    """Build the user message for the reviewer."""
+    """Build the user message for the reviewer.
+
+    Args:
+        json_mode: When True, appends a reminder that the response must be a
+            json object.  Required by the OpenAI API when using
+            ``text={"format": {"type": "json_object"}}`` — the input message
+            must contain the word 'json' or the API raises an error.
+    """
     parts = []
 
     # Surface abnormal execution prominently at the top
@@ -187,6 +196,11 @@ def build_reviewer_packet(
     if len(git_diff) > 4000:
         diff_truncated += "\n... [truncated]"
     parts.append(f"\n## Git diff\n{diff_truncated}")
+
+    if json_mode:
+        parts.append(
+            "\nRespond with a json object using exactly the keys specified above."
+        )
 
     return "\n".join(parts)
 
@@ -264,7 +278,10 @@ def call_initial_planner(
     client = OpenAI(api_key=api_key)
 
     instructions = INITIAL_PLANNER_SYSTEM_PROMPT.format(max_iterations=max_iterations)
-    user_msg = f"## Sprint brief\n{objective}\n\n## Repository context\n{repo_ctx}"
+    user_msg = (
+        f"## Sprint brief\n{objective}\n\n## Repository context\n{repo_ctx}"
+        f"\n\nRespond with a json object using exactly the keys specified above."
+    )
 
     response = client.responses.create(
         model=model,
