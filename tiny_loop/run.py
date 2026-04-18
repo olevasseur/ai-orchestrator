@@ -77,10 +77,13 @@ def run(
         sys.exit(1)
 
     repo = str(Path(repo_path).resolve())
+    project = Path(repo).name or "unknown"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
-    # Output directory for this run — unique per run under /tmp by default
-    out = Path(output_dir) if output_dir else Path("/tmp/tiny-loop-runs") / run_id
+    # Output directory: /tmp/tiny-loop-runs/<project>/<run_id>/ by default.
+    # Project subfolder keeps concurrent runs against different repos cleanly separated.
+    tiny_loop_root = Path("/tmp/tiny-loop-runs")
+    out = Path(output_dir) if output_dir else tiny_loop_root / project / run_id
     out.mkdir(parents=True, exist_ok=True)
     state_path = out / "state.json"
 
@@ -96,7 +99,12 @@ def run(
     session_id: str | None = None
     start_commit = head_commit(repo)
 
-    # Snapshot /tmp top-level entries before the sprint so we can detect new artifacts
+    # Snapshot /tmp top-level entries and the wall-clock start time so we can
+    # later detect new artifacts touched during *this* sprint only. Using mtime
+    # in addition to the set diff prevents concurrent tiny_loop runs from
+    # claiming each other's /tmp files.
+    import time
+    sprint_start_mtime = time.time()
     tmp_before = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
 
     # --- Initial planning: ask OpenAI for a bounded iteration-1 step ---
@@ -129,12 +137,15 @@ def run(
         # 1. Build the Claude prompt
         if itr_num == 1:
             current_step = initial_plan.iteration_1_prompt
-            prompt = build_initial_prompt(current_step, ctx, json_mode=True)
+            prompt = build_initial_prompt(
+                current_step, ctx, artifact_dir=str(out), json_mode=True,
+            )
         else:
             last_decision = state["iterations"][-1]["reviewer_decision"]
             current_step = last_decision.get("next_prompt_for_claude") or objective
             prompt = build_continuation_prompt(
-                objective, current_step, state["iterations"], json_mode=True
+                objective, current_step, state["iterations"],
+                artifact_dir=str(out), json_mode=True,
             )
 
         # 2. Classify step type
@@ -289,22 +300,34 @@ def run(
     package_artifacts(repo, out, start_commit, state)
 
     # Collect all sprint artifacts:
-    # 1. Harness output directory (state.json, summary.md)
+    # 1. Harness output directory (state.json, summary.md, and the artifacts/
+    #    subdirectory where Claude was told to write smoke outputs).
     harness_artifacts = sorted(str(p) for p in out.rglob("*") if p.is_file())
 
-    # 2. New /tmp entries created during the sprint (Claude's evidence dirs/files)
+    # 2. Legacy fallback: new /tmp entries created during the sprint.
+    # Claude is now instructed to write artifacts under out/artifacts/, but
+    # older prompts or unexpected writes may still land in /tmp.  We keep this
+    # sweep as a safety net but scope it narrowly: only top-level directories
+    # whose name looks project-related (contains "platform-graph", "smoke",
+    # or the project name) are included, to avoid picking up unrelated files.
     tmp_after = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
-    new_tmp_entries = sorted(str(p) for p in (tmp_after - tmp_before) if p != out)
-    # Expand directories to list their contents
+    new_tmp_entries = sorted(
+        str(p) for p in (tmp_after - tmp_before)
+        if p != out and p != tiny_loop_root and tiny_loop_root not in p.parents
+    )
     external_artifacts = []
     for entry in new_tmp_entries:
         p = Path(entry)
-        if p.is_file():
-            external_artifacts.append(str(p))
-        elif p.is_dir():
-            for f in sorted(p.rglob("*")):
-                if f.is_file():
-                    external_artifacts.append(str(f))
+        try:
+            if p.is_file():
+                if p.stat().st_mtime >= sprint_start_mtime:
+                    external_artifacts.append(str(p))
+            elif p.is_dir():
+                for f in sorted(p.rglob("*")):
+                    if f.is_file() and f.stat().st_mtime >= sprint_start_mtime:
+                        external_artifacts.append(str(f))
+        except OSError:
+            continue
 
     all_artifacts = harness_artifacts + external_artifacts
     state["artifacts"] = all_artifacts
