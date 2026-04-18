@@ -331,6 +331,18 @@ def run(
 
     all_artifacts = harness_artifacts + external_artifacts
     state["artifacts"] = all_artifacts
+
+    # If the run dir has accumulated a lot of files, zip it for easier upload.
+    archive_path: Path | None = None
+    if len(harness_artifacts) >= 20:
+        import zipfile
+        archive_path = out.parent / f"{out.name}.zip"
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in out.rglob("*"):
+                if p.is_file():
+                    zf.write(p, arcname=p.relative_to(out.parent))
+        state["archive"] = str(archive_path)
+
     save_state(state, state_path)
 
     print(f"\n{'=' * 50}")
@@ -339,6 +351,8 @@ def run(
     print(f"  Run dir: {out}")
     print(f"  State:   {state_path}")
     print(f"  Summary: {summary_path}")
+    if archive_path:
+        print(f"  Archive: {archive_path} ({len(harness_artifacts)} files)")
     if all_artifacts:
         print(f"\n  Sprint artifacts ({len(all_artifacts)}):")
         for f in all_artifacts:
