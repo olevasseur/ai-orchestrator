@@ -286,9 +286,6 @@ def run(
     state["ended_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state, state_path)
 
-    # Write human-readable summary
-    _write_summary(state, out / "summary.md")
-
     summary_path = out / "summary.md"
 
     # Collect repo files changed during the sprint (for state record)
@@ -342,6 +339,10 @@ def run(
                 if p.is_file():
                     zf.write(p, arcname=p.relative_to(out.parent))
         state["archive"] = str(archive_path)
+
+    # Write human-readable summary (after files_changed, artifacts, and archive
+    # are populated so they appear in the markdown).
+    _write_summary(state, summary_path)
 
     save_state(state, state_path)
 
