@@ -19,6 +19,35 @@ executor_provider: claude     # claude | codex
 claude_cli_path: claude       # path to the `claude` binary
 codex_cli_path: codex         # path to the `codex` binary (used when executor_provider: codex)
 
+# Codex worktree isolation.
+# Codex runs with --dangerously-bypass-approvals-and-sandbox, which means it
+# can execute arbitrary shell commands without per-action approval. To make
+# this safe, the orchestrator can stage each Codex run inside a disposable
+# git worktree, capture the resulting unified diff as an artifact, and leave
+# the source repo untouched until a human explicitly applies the patch with
+# `git -C <repo> apply <iterations/<n>/codex_workspace.diff>`.
+#
+#   codex_workspace_strategy:
+#     worktree - RECOMMENDED. Create a detached worktree under
+#                codex_worktree_base_dir from the source repo's HEAD, run
+#                Codex there, persist the diff, then dispose of the worktree.
+#                The source repo is never written to.
+#     inplace  - Legacy/experimental: run Codex directly in the target repo.
+#                Only use this when the target repo is itself disposable
+#                (VM, container, throwaway clone) and contains no secrets.
+#   codex_worktree_base_dir:
+#     A dedicated temp location for Codex worktrees. MUST NOT point at the
+#     real repo, ~/.orchestrator/runs, or any other artifact directory.
+#     Default: /tmp/ai-orchestrator-codex-worktrees
+#   codex_apply_policy (only relevant when strategy == worktree):
+#     manual  - DEFAULT. Diff is saved as an artifact for human review/apply.
+#               Worktree is cleaned up after the diff is captured.
+#     discard - Same cleanup as manual, semantically signals "do not apply".
+#     auto    - NOT IMPLEMENTED. Will raise NotImplementedError.
+codex_workspace_strategy: worktree
+codex_worktree_base_dir: /tmp/ai-orchestrator-codex-worktrees
+codex_apply_policy: manual
+
 # Equivalent nested form (either form works; flat keys above take precedence):
 # executor:
 #   mode: cli

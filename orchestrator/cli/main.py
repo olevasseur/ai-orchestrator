@@ -78,6 +78,9 @@ def start(
         cfg.claude_cli_path,
         provider=cfg.executor_provider,
         codex_cli_path=cfg.codex_cli_path,
+        codex_workspace_strategy=cfg.codex_workspace_strategy,
+        codex_worktree_base_dir=cfg.codex_worktree_base_dir,
+        codex_apply_policy=cfg.codex_apply_policy,
     )
 
     # Resolve planner (stub in demo mode if no key)
@@ -188,6 +191,9 @@ def resume(
         cfg.claude_cli_path,
         provider=cfg.executor_provider,
         codex_cli_path=cfg.codex_cli_path,
+        codex_workspace_strategy=cfg.codex_workspace_strategy,
+        codex_worktree_base_dir=cfg.codex_worktree_base_dir,
+        codex_apply_policy=cfg.codex_apply_policy,
     )
     planner = _make_planner(cfg)
 
@@ -237,6 +243,9 @@ def review(
         cfg.claude_cli_path,
         provider=cfg.executor_provider,
         codex_cli_path=cfg.codex_cli_path,
+        codex_workspace_strategy=cfg.codex_workspace_strategy,
+        codex_worktree_base_dir=cfg.codex_worktree_base_dir,
+        codex_apply_policy=cfg.codex_apply_policy,
     )
     planner = _make_planner(cfg)
 

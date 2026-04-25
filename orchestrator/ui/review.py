@@ -137,6 +137,50 @@ def show_execution_result(result, iteration: int) -> None:
         )
 
 
+def show_codex_patch(
+    diff: str,
+    workspace_path: str,
+    diff_path,
+    repo_path: str,
+) -> None:
+    """Surface a Codex worktree-mode patch to the human reviewer.
+
+    Codex ran in a disposable worktree, so the real repo at ``repo_path`` is
+    untouched. The diff is the handoff artifact: nothing is applied
+    automatically. We show a preview, the on-disk patch path, and the exact
+    `git apply` command the human can run to land the changes.
+    """
+    console.print(
+        Rule("[bold magenta]Codex worktree patch (review required)[/bold magenta]")
+    )
+    if workspace_path:
+        console.print(f"[dim]Worktree (already cleaned up):[/dim] {workspace_path}")
+    if not diff:
+        console.print(
+            "[yellow]Codex produced no diff — nothing to apply.[/yellow]"
+        )
+        return
+
+    preview = diff if len(diff) <= 4000 else diff[:4000] + "\n…[truncated]"
+    console.print(
+        Panel(
+            Syntax(preview, "diff", theme="ansi_dark", line_numbers=False),
+            title="Codex diff (preview)",
+            border_style="magenta",
+        )
+    )
+    if diff_path:
+        console.print(f"[dim]Patch saved to:[/dim] {diff_path}")
+        console.print(
+            "[bold]Apply manually with:[/bold]\n"
+            f"  [cyan]git -C {repo_path} apply {diff_path}[/cyan]"
+        )
+    console.print(
+        "[yellow]No automatic apply — the source repo is untouched until "
+        "you run the command above.[/yellow]"
+    )
+
+
 def show_memory_saturation(status: dict) -> None:
     """Render a one-line memory health indicator after each iteration."""
     rec = status["recommendation"]

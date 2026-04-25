@@ -33,6 +33,19 @@ class Config:
     claude_cli_path: str = "claude"     # path to the `claude` binary
     codex_cli_path: str = "codex"       # path to the `codex` binary (experimental)
 
+    # Codex worktree isolation (experimental)
+    # codex_workspace_strategy: "inplace" runs Codex directly in the target repo
+    #   (current behaviour). "worktree" creates a disposable git worktree under
+    #   codex_worktree_base_dir and runs Codex there, isolating its filesystem
+    #   writes from the user's working tree.
+    codex_workspace_strategy: str = "inplace"          # "inplace" | "worktree"
+    codex_worktree_base_dir: str = "~/.orchestrator/codex-worktrees"
+    # codex_apply_policy controls what happens to the worktree after Codex runs:
+    #   "manual" — leave the worktree in place for the human to inspect/apply
+    #   "auto"   — apply the diff back to the source repo automatically
+    #   "discard"— throw the worktree away once the run is captured
+    codex_apply_policy: str = "manual"                  # "manual" | "auto" | "discard"
+
     # Storage
     log_dir: str = "~/.orchestrator/runs"
 

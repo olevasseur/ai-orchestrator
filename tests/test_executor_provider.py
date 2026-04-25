@@ -294,3 +294,355 @@ class TestSessionMetadataIsProviderOpaque:
         )
         assert result.exit_code == 0
         assert result.session_id == ""  # demo never issues session ids
+
+
+# ---------------------------------------------------------------------------
+# Codex worktree isolation
+# ---------------------------------------------------------------------------
+
+import subprocess as _real_subprocess  # noqa: E402
+
+from orchestrator.executor.cli_executor import CodexExecutor  # noqa: E402
+
+
+def _init_repo(path: Path) -> str:
+    """Create a git repo with one committed file. Return the initial HEAD sha."""
+    _real_subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    _real_subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
+    _real_subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    (path / "hello.txt").write_text("original\n")
+    _real_subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    _real_subprocess.run(["git", "-C", str(path), "commit", "-qm", "init"], check=True)
+    return _real_subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _patch_codex_popen(monkeypatch, *, edits=None, exit_code=0, raise_exc=None):
+    """Replace Popen so codex calls are faked but real git commands pass through.
+
+    `edits` is an optional callable receiving the cwd Path; use it to mutate the
+    worktree as if Codex had edited files. `raise_exc` lets a test simulate
+    Codex blowing up mid-run.
+    """
+    import orchestrator.executor.cli_executor as mod
+    real_popen = _real_subprocess.Popen
+    captured: dict = {}
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            captured["cmd"] = kw.get("args", a[0] if a else None)
+            captured["cwd"] = kw.get("cwd")
+            if raise_exc is not None:
+                raise raise_exc
+            if edits is not None:
+                edits(Path(kw["cwd"]))
+            self.stdout = iter([
+                '{"type":"thread.started","thread_id":"tid"}\n',
+                '{"type":"item.completed","item":'
+                '{"type":"agent_message","text":"done"}}\n',
+            ])
+            self.stderr = iter([])
+            self.returncode = exit_code
+        def wait(self, timeout=None): return exit_code
+
+    def selective(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, list) and cmd and "codex" in str(cmd[0]):
+            return FakeProc(*args, **kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "Popen", selective)
+    return captured
+
+
+class TestCodexInplaceUnchanged:
+    """Direct (inplace) mode keeps prior behaviour: no worktree, no diff field."""
+
+    def test_inplace_runs_in_repo_path(self, tmp_path: Path, monkeypatch):
+        captured = _patch_codex_popen(monkeypatch)
+        e = CodexExecutor(workspace_strategy="inplace")
+        res = e.run(prompt="x", repo_path=str(tmp_path))
+        assert captured["cwd"] == str(tmp_path.resolve())
+        assert res.workspace_path == ""
+        assert res.diff == ""
+        assert res.exit_code == 0
+
+    def test_default_strategy_is_inplace(self):
+        # Default constructor must preserve direct-mode behaviour so existing
+        # call sites that don't pass the new kwargs still get the old executor.
+        e = CodexExecutor()
+        assert e.workspace_strategy == "inplace"
+
+
+class TestCodexWorktreeMode:
+    def test_worktree_runs_under_base_dir_not_source_repo(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        captured = _patch_codex_popen(monkeypatch, edits=lambda p: None)
+        e = CodexExecutor(
+            workspace_strategy="worktree",
+            worktree_base_dir=str(base),
+        )
+        res = e.run(prompt="x", repo_path=str(src))
+
+        # Codex was launched with cwd inside base, NOT inside src.
+        assert captured["cwd"] != str(src.resolve())
+        assert captured["cwd"].startswith(str(base.resolve()))
+        # The reported workspace_path also lives under base.
+        assert res.workspace_path.startswith(str(base.resolve()))
+
+    def test_worktree_base_dir_is_created_if_missing(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "does" / "not" / "exist"
+        assert not base.exists()
+
+        _patch_codex_popen(monkeypatch, edits=lambda p: None)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        e.run(prompt="x", repo_path=str(src))
+        assert base.exists()
+
+    def test_source_repo_unchanged_after_worktree_run(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        head_before = _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        def fake_edits(cwd: Path):
+            (cwd / "hello.txt").write_text("modified by codex\n")
+            (cwd / "new.txt").write_text("brand new\n")
+
+        _patch_codex_popen(monkeypatch, edits=fake_edits)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        e.run(prompt="x", repo_path=str(src))
+
+        head_after = _real_subprocess.run(
+            ["git", "-C", str(src), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        status = _real_subprocess.run(
+            ["git", "-C", str(src), "status", "--porcelain"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert head_before == head_after
+        assert status == ""
+        assert (src / "hello.txt").read_text() == "original\n"
+        assert not (src / "new.txt").exists()
+
+    def test_diff_captures_modifications_and_new_files(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        def fake_edits(cwd: Path):
+            (cwd / "hello.txt").write_text("modified by codex\n")
+            (cwd / "new.txt").write_text("brand new\n")
+
+        _patch_codex_popen(monkeypatch, edits=fake_edits)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        res = e.run(prompt="x", repo_path=str(src))
+
+        assert "hello.txt" in res.diff
+        assert "modified by codex" in res.diff
+        assert "new.txt" in res.diff
+        assert "brand new" in res.diff
+        assert res.diff.startswith("diff --git")
+
+    def test_diff_empty_when_codex_does_nothing(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        _patch_codex_popen(monkeypatch, edits=lambda p: None)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        res = e.run(prompt="x", repo_path=str(src))
+        assert res.diff == ""
+        # workspace_path is still surfaced even when no diff was produced.
+        assert res.workspace_path.startswith(str(base.resolve()))
+
+    def test_cleanup_removes_worktree_on_success(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        def fake_edits(cwd: Path):
+            (cwd / "hello.txt").write_text("changed\n")
+
+        _patch_codex_popen(monkeypatch, edits=fake_edits)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        res = e.run(prompt="x", repo_path=str(src))
+
+        assert not Path(res.workspace_path).exists(), (
+            f"worktree leaked: {res.workspace_path}"
+        )
+        # Also: nothing else under base should remain.
+        leftovers = list(base.iterdir()) if base.exists() else []
+        assert leftovers == []
+
+    def test_cleanup_runs_even_when_codex_crashes(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        _patch_codex_popen(
+            monkeypatch, raise_exc=RuntimeError("simulated codex crash")
+        )
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        with pytest.raises(RuntimeError, match="simulated codex crash"):
+            e.run(prompt="x", repo_path=str(src))
+
+        # The worktree must not be left behind on failure.
+        leftovers = list(base.iterdir()) if base.exists() else []
+        assert leftovers == [], f"worktree leaked after crash: {leftovers}"
+        # And the source repo must still be clean.
+        status = _real_subprocess.run(
+            ["git", "-C", str(src), "status", "--porcelain"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert status == ""
+
+    def test_worktree_base_dir_isolated_from_artifact_dirs(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The worktree path must not be under common artifact locations
+        (~/.orchestrator/runs, /tmp/tiny-loop-runs, the source repo)."""
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "wt-base"
+
+        _patch_codex_popen(monkeypatch, edits=lambda p: None)
+        e = CodexExecutor(workspace_strategy="worktree", worktree_base_dir=str(base))
+        res = e.run(prompt="x", repo_path=str(src))
+
+        wt = Path(res.workspace_path).resolve()
+        src_resolved = src.resolve()
+        assert str(wt).startswith(str(base.resolve()))
+        assert str(src_resolved) not in str(wt)
+        assert "/.orchestrator/runs" not in str(wt)
+        assert "/tiny-loop-runs" not in str(wt)
+        # And it must not be in the user's home root either.
+        assert wt.parent != Path.home()
+
+
+class TestCodexExecutorValidation:
+    def test_unknown_workspace_strategy_raises(self):
+        with pytest.raises(ValueError, match="workspace_strategy"):
+            CodexExecutor(workspace_strategy="bogus")
+
+    def test_unknown_apply_policy_raises(self):
+        with pytest.raises(ValueError, match="apply_policy"):
+            CodexExecutor(apply_policy="bogus")
+
+    def test_apply_policy_auto_raises_not_implemented(
+        self, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        e = CodexExecutor(
+            workspace_strategy="worktree",
+            worktree_base_dir=str(tmp_path / "wt"),
+            apply_policy="auto",
+        )
+        with pytest.raises(NotImplementedError, match="auto"):
+            e.run(prompt="x", repo_path=str(src))
+
+
+class TestRunStorePersistsCodexWorkspace:
+    """RunStore is the artifact handoff: the Codex diff must be written to a
+    file the human can apply, and the workspace path must be recorded for
+    forensics. write_codex_workspace is the only place this happens."""
+
+    def test_writes_diff_and_path(self, tmp_path: Path):
+        from orchestrator.storage.store import RunStore
+        store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
+        diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+        diff_path = store.write_codex_workspace(0, diff, "/tmp/wt/codex-1")
+
+        assert diff_path is not None
+        assert diff_path.exists()
+        assert diff_path.read_text() == diff
+        assert (store.iteration_dir(0) / "codex_workspace_path.txt").read_text() \
+            == "/tmp/wt/codex-1"
+
+    def test_no_diff_no_file(self, tmp_path: Path):
+        from orchestrator.storage.store import RunStore
+        store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
+        diff_path = store.write_codex_workspace(0, "", "")
+        assert diff_path is None
+        assert not (store.iteration_dir(0) / "codex_workspace.diff").exists()
+        assert not (store.iteration_dir(0) / "codex_workspace_path.txt").exists()
+
+    def test_records_workspace_even_when_diff_empty(self, tmp_path: Path):
+        # Codex worktree mode that produced no edits should still leave a
+        # forensic breadcrumb of where it ran.
+        from orchestrator.storage.store import RunStore
+        store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
+        diff_path = store.write_codex_workspace(0, "", "/tmp/wt/empty")
+        assert diff_path is None
+        assert (store.iteration_dir(0) / "codex_workspace_path.txt").read_text() \
+            == "/tmp/wt/empty"
+
+    def test_round_trip_via_read_codex_workspace(self, tmp_path: Path):
+        from orchestrator.storage.store import RunStore
+        store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
+        store.write_codex_workspace(0, "DIFF", "/tmp/wt/p")
+        rd = store.read_codex_workspace(0)
+        assert rd["diff"] == "DIFF"
+        assert rd["workspace_path"] == "/tmp/wt/p"
+        assert rd["diff_path"].endswith("codex_workspace.diff")
+
+    def test_read_executor_output_includes_codex_fields(self, tmp_path: Path):
+        from orchestrator.storage.store import RunStore
+        store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
+        store.write_executor_output(0, "out", "err", 0)
+        store.write_codex_workspace(0, "DIFF", "/tmp/wt/p")
+        eo = store.read_executor_output(0)
+        assert eo["codex_workspace_diff"] == "DIFF"
+        assert eo["codex_workspace_path"] == "/tmp/wt/p"
+
+
+class TestMakeExecutorForwardsCodexConfig:
+    def test_make_executor_passes_worktree_kwargs(self, tmp_path: Path):
+        e = make_executor(
+            "cli",
+            provider="codex",
+            codex_workspace_strategy="worktree",
+            codex_worktree_base_dir=str(tmp_path / "wt"),
+            codex_apply_policy="manual",
+        )
+        assert isinstance(e, CodexExecutor)
+        assert e.workspace_strategy == "worktree"
+        assert e.worktree_base_dir == str(tmp_path / "wt")
+        assert e.apply_policy == "manual"
+
+    def test_make_executor_codex_defaults_to_inplace(self):
+        # When the new kwargs are omitted, prior Codex behaviour is preserved.
+        e = make_executor("cli", provider="codex")
+        assert isinstance(e, CodexExecutor)
+        assert e.workspace_strategy == "inplace"

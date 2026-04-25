@@ -118,7 +118,9 @@ Each run creates a directory under `~/.orchestrator/runs/<run-id>/`:
       executor_stdout.log
       executor_stderr.log
       executor_exit_code.txt
-      git_diff.txt
+      git_diff.txt                # diff of the source repo (empty in Codex worktree mode)
+      codex_workspace.diff        # Codex worktree-mode patch (only when Codex modified files)
+      codex_workspace_path.txt    # absolute path of the disposable worktree (cleaned up post-run)
       validation_stdout.log
       iteration_state.yaml
     1/
@@ -189,17 +191,74 @@ no per-action prompt. Treat it like running untrusted code as your user.
 Session resumption is not yet implemented for Codex; passing
 `resume_session_id` to `CodexExecutor.run()` raises `NotImplementedError`.
 
+### Codex worktree isolation (recommended default)
+
+Because the Codex CLI bypasses approvals and sandboxing, the orchestrator
+ships a workspace-isolation mode that is enabled by default in `config.yaml`.
+With `codex_workspace_strategy: worktree`, every Codex iteration:
+
+1. Creates a **detached git worktree** under `codex_worktree_base_dir`
+   (default `/tmp/ai-orchestrator-codex-worktrees`) from the source repo's
+   current `HEAD`.
+2. Runs `codex exec` with the worktree as `cwd` — the source repo is never
+   the working directory.
+3. Captures the unified diff (including new and deleted files) by staging
+   everything in the worktree and running `git diff --cached HEAD`.
+4. Persists the diff as `iterations/<n>/codex_workspace.diff` and the
+   workspace path as `iterations/<n>/codex_workspace_path.txt`.
+5. Removes the worktree (success **and** failure) so disk usage stays bounded.
+6. Surfaces the patch to the human reviewer with the exact apply command:
+   `git -C <repo> apply <path/to/codex_workspace.diff>`.
+
+```yaml
+# config.yaml
+executor_provider: codex
+codex_workspace_strategy: worktree              # worktree | inplace
+codex_worktree_base_dir: /tmp/ai-orchestrator-codex-worktrees
+codex_apply_policy: manual                      # manual | discard  (auto: not implemented)
+```
+
+**Safety guarantees**
+
+- The source repo's `HEAD` and working tree are unchanged after a Codex
+  iteration; nothing is auto-applied.
+- All worktrees land under `codex_worktree_base_dir` — never inside the
+  source repo, the user's home, `~/.orchestrator/runs/`, or any other
+  artifact directory. `tests/test_executor_provider.py::TestCodexWorktreeMode`
+  verifies this.
+- Cleanup runs in a `finally` block, so a Codex crash or timeout still
+  removes the worktree (the path stays on `ExecutionResult.workspace_path`
+  for forensics).
+- `codex_apply_policy: auto` is intentionally rejected with
+  `NotImplementedError` — automatic apply is out of scope for this sprint.
+
+**`inplace` mode** remains available for experiments where the target repo is
+itself disposable, but is no longer the default. Claude (`executor_provider:
+claude`) is unaffected by any of these knobs.
+
 ### Smoke-testing real Codex
 
 A standalone script exercises the real `codex` binary against a fresh
 disposable repo and prints the resulting `ExecutionResult`:
 
 ```bash
-.venv/bin/python scripts/smoke_test_codex.py
+# Direct (inplace) mode — codex edits the throwaway repo directly
+CODEX_SMOKE_TEST_OK=1 .venv/bin/python scripts/smoke_test_codex.py
+
+# Worktree isolation mode — codex edits a disposable worktree, the
+# throwaway repo stays clean, and the diff is captured + asserted
+CODEX_SMOKE_TEST_OK=1 .venv/bin/python scripts/smoke_test_codex.py --worktree
 ```
 
-It refuses to run unless `CODEX_SMOKE_TEST_OK=1` is set, to make the
-"this will run dangerous Codex" step explicit. The unit tests in
+The `--worktree` invocation prompts Codex to create `HELLO.txt`, then
+verifies that the source repo's HEAD/working tree is unchanged, the file is
+absent from the source repo, the worktree was cleaned up, the worktree
+landed under the configured base dir, and the captured diff contains the
+new file. It exits non-zero if any of those isolation invariants are
+violated.
+
+The smoke script refuses to run unless `CODEX_SMOKE_TEST_OK=1` is set, to
+make the "this will run dangerous Codex" step explicit. The unit tests in
 `tests/test_executor_provider.py` mock subprocess and do **not** require
 Codex to be installed.
 

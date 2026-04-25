@@ -203,6 +203,21 @@ class OrchestratorRunner:
                 diff = git_utils.diff_summary(run_state.repo_path)
                 self.store.write_git_diff(itr_n, diff)
 
+                # Codex worktree mode: the source repo is intentionally untouched,
+                # so `git diff` above is empty. The real changeset lives on
+                # result.diff, captured inside the disposable worktree. Persist
+                # it as the human-applyable patch artifact and surface it.
+                if result.diff or result.workspace_path:
+                    diff_path = self.store.write_codex_workspace(
+                        itr_n, result.diff, result.workspace_path
+                    )
+                    ui.show_codex_patch(
+                        result.diff,
+                        result.workspace_path,
+                        diff_path,
+                        run_state.repo_path,
+                    )
+
                 # Checkpoint execution findings before validation so they survive
                 # if validation is interrupted (see clear_exec_note at end of loop).
                 if result.exit_code == 0:

@@ -259,6 +259,9 @@ def _launch_runner(
         cfg.claude_cli_path,
         provider=cfg.executor_provider,
         codex_cli_path=cfg.codex_cli_path,
+        codex_workspace_strategy=cfg.codex_workspace_strategy,
+        codex_worktree_base_dir=cfg.codex_worktree_base_dir,
+        codex_apply_policy=cfg.codex_apply_policy,
     )
 
     store = RunStore.create(cfg.log_dir, repo_path)
@@ -309,6 +312,9 @@ def _resume_run(sess: WebSession) -> None:
         cfg.claude_cli_path,
         provider=cfg.executor_provider,
         codex_cli_path=cfg.codex_cli_path,
+        codex_workspace_strategy=cfg.codex_workspace_strategy,
+        codex_worktree_base_dir=cfg.codex_worktree_base_dir,
+        codex_apply_policy=cfg.codex_apply_policy,
     )
 
     sess._planner = planner

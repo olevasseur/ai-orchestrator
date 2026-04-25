@@ -138,6 +138,36 @@ class RunStore:
     def write_git_diff(self, n: int, diff: str) -> None:
         (self.iteration_dir(n) / "git_diff.txt").write_text(diff)
 
+    def write_codex_workspace(
+        self, n: int, diff: str, workspace_path: str
+    ) -> Path | None:
+        """Persist a Codex worktree-mode diff (and the workspace it ran in).
+
+        Returns the path to the written diff file (or None if no diff was
+        produced). The diff is the user-facing handoff artifact: a human can
+        review it and apply with `git -C <repo> apply <path>`. The workspace
+        path is recorded separately for forensics — the worktree itself is
+        already cleaned up by the executor.
+        """
+        d = self.iteration_dir(n)
+        diff_path: Path | None = None
+        if diff:
+            diff_path = d / "codex_workspace.diff"
+            diff_path.write_text(diff)
+        if workspace_path:
+            (d / "codex_workspace_path.txt").write_text(workspace_path)
+        return diff_path
+
+    def read_codex_workspace(self, n: int) -> dict:
+        d = self.iteration_dir(n)
+        diff_p = d / "codex_workspace.diff"
+        path_p = d / "codex_workspace_path.txt"
+        return {
+            "diff": diff_p.read_text() if diff_p.exists() else "",
+            "diff_path": str(diff_p) if diff_p.exists() else "",
+            "workspace_path": path_p.read_text() if path_p.exists() else "",
+        }
+
     def write_validation_output(self, n: int, stdout: str, stderr: str) -> None:
         d = self.iteration_dir(n)
         (d / "validation_stdout.log").write_text(stdout)
@@ -163,6 +193,8 @@ class RunStore:
             ("stderr", "executor_stderr.log"),
             ("exit_code", "executor_exit_code.txt"),
             ("git_diff", "git_diff.txt"),
+            ("codex_workspace_diff", "codex_workspace.diff"),
+            ("codex_workspace_path", "codex_workspace_path.txt"),
             ("validation_stdout", "validation_stdout.log"),
         ]:
             p = d / fname

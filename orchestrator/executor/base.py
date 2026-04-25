@@ -13,6 +13,13 @@ class ExecutionResult:
     exit_code: int
     timed_out: bool = False
     session_id: str = ""
+    # Populated only by executors that stage their work in an isolated workspace
+    # (currently CodexExecutor with workspace_strategy="worktree"). `diff` is the
+    # unified-diff patch produced inside that workspace; `workspace_path` is the
+    # filesystem path where execution actually ran. Empty string means "ran in
+    # the caller's repo_path, no separate workspace".
+    diff: str = ""
+    workspace_path: str = ""
 
 
 class BaseExecutor(ABC):
