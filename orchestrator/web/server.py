@@ -254,7 +254,12 @@ def _launch_runner(
         planner: OpenAIPlanner | DirectPlanner = DirectPlanner()
     else:
         planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
-    executor = make_executor(cfg.executor_mode, cfg.claude_cli_path)
+    executor = make_executor(
+        cfg.executor_mode,
+        cfg.claude_cli_path,
+        provider=cfg.executor_provider,
+        codex_cli_path=cfg.codex_cli_path,
+    )
 
     store = RunStore.create(cfg.log_dir, repo_path)
     store.write_task(task)
@@ -299,7 +304,12 @@ def _resume_run(sess: WebSession) -> None:
     """Resume an interrupted run, reusing its existing store."""
     cfg = Config.load()
     planner = OpenAIPlanner(api_key=cfg.openai_api_key, model=cfg.openai_model)
-    executor = make_executor(cfg.executor_mode, cfg.claude_cli_path)
+    executor = make_executor(
+        cfg.executor_mode,
+        cfg.claude_cli_path,
+        provider=cfg.executor_provider,
+        codex_cli_path=cfg.codex_cli_path,
+    )
 
     sess._planner = planner
     sess.status = "planning"

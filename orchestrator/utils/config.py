@@ -28,8 +28,10 @@ class Config:
     openai_model: str = "gpt-4o"
 
     # Executor
-    executor_mode: str = "cli"          # "cli" | "sdk"
+    executor_mode: str = "cli"          # "cli" | "demo"
+    executor_provider: str = "claude"   # "claude" | "codex" — which adapter to build for "cli" mode
     claude_cli_path: str = "claude"     # path to the `claude` binary
+    codex_cli_path: str = "codex"       # path to the `codex` binary (experimental)
 
     # Storage
     log_dir: str = "~/.orchestrator/runs"
@@ -64,6 +66,28 @@ class Config:
             with path.open() as f:
                 raw = yaml.safe_load(f) or {}
 
+        # Support a nested `executor:` block as an alternative to flat keys:
+        #   executor:
+        #     provider: claude
+        #     claude: { command: claude }
+        #     codex:  { command: codex }
+        # Flat keys (executor_mode, executor_provider, claude_cli_path,
+        # codex_cli_path) still work and take precedence if both are set.
+        executor_block = raw.get("executor")
+        if isinstance(executor_block, dict):
+            if "provider" in executor_block and "executor_provider" not in raw:
+                raw["executor_provider"] = executor_block["provider"]
+            if "mode" in executor_block and "executor_mode" not in raw:
+                raw["executor_mode"] = executor_block["mode"]
+            claude_block = executor_block.get("claude")
+            if isinstance(claude_block, dict) and "command" in claude_block \
+                    and "claude_cli_path" not in raw:
+                raw["claude_cli_path"] = claude_block["command"]
+            codex_block = executor_block.get("codex")
+            if isinstance(codex_block, dict) and "command" in codex_block \
+                    and "codex_cli_path" not in raw:
+                raw["codex_cli_path"] = codex_block["command"]
+
         # 2. Override with environment variables for secrets
         cfg = cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
         if key := os.environ.get("OPENAI_API_KEY"):
@@ -72,5 +96,7 @@ class Config:
             cfg.openai_model = model
         if mode := os.environ.get("EXECUTOR_MODE"):
             cfg.executor_mode = mode
+        if provider := os.environ.get("EXECUTOR_PROVIDER"):
+            cfg.executor_provider = provider
 
         return cfg

@@ -147,10 +147,56 @@ class DemoExecutor(BaseExecutor):
         return ExecutionResult(stdout=output, stderr="", exit_code=0)
 
 
-def make_executor(mode: str, claude_cli_path: str = "claude") -> BaseExecutor:
-    """Factory: return the right executor for the configured mode."""
+class CodexExecutor(BaseExecutor):
+    """
+    Experimental Codex CLI executor — scaffolding only.
+
+    The exact non-interactive invocation, output format, and session model
+    for the Codex CLI are not yet pinned down (see codex_executor_feasibility.md).
+    Construction is allowed so provider selection and config wiring can be
+    tested, but `run()` raises until a concrete adapter is implemented.
+    """
+
+    def __init__(self, codex_cli_path: str = "codex") -> None:
+        self.codex_cli_path = codex_cli_path
+
+    def run(
+        self,
+        prompt: str,
+        repo_path: str,
+        timeout: int = 600,
+        log_stdout_path: str | None = None,
+        log_stderr_path: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> ExecutionResult:
+        raise NotImplementedError(
+            "Codex executor is experimental: provider selection is wired up "
+            "but the Codex CLI invocation (argv, output format, session "
+            "continuation) has not yet been implemented. Set "
+            "executor_provider=claude (the default) to run."
+        )
+
+
+def make_executor(
+    mode: str,
+    claude_cli_path: str = "claude",
+    *,
+    provider: str = "claude",
+    codex_cli_path: str = "codex",
+) -> BaseExecutor:
+    """Factory: return the right executor for the configured mode and provider.
+
+    `mode` selects the execution surface (cli vs demo). `provider` selects
+    which agent adapter to build for cli mode. Demo mode ignores provider.
+    """
     if mode == "demo":
         return DemoExecutor()
     if mode == "cli":
-        return CLIExecutor(claude_cli_path=claude_cli_path)
+        if provider == "claude":
+            return CLIExecutor(claude_cli_path=claude_cli_path)
+        if provider == "codex":
+            return CodexExecutor(codex_cli_path=codex_cli_path)
+        raise ValueError(
+            f"Unknown executor provider: {provider!r}. Use 'claude' or 'codex'."
+        )
     raise ValueError(f"Unknown executor mode: {mode!r}. Use 'cli' or 'demo'.")

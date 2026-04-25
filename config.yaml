@@ -6,7 +6,18 @@ openai_model: gpt-4o
 
 # Executor settings
 executor_mode: cli            # cli | demo
+executor_provider: claude     # claude | codex (codex is experimental — see codex_executor_feasibility.md)
 claude_cli_path: claude       # path to the `claude` binary
+codex_cli_path: codex         # path to the `codex` binary (used when executor_provider: codex)
+
+# Equivalent nested form (either form works; flat keys above take precedence):
+# executor:
+#   mode: cli
+#   provider: claude
+#   claude:
+#     command: claude
+#   codex:
+#     command: codex
 
 # Storage
 log_dir: ~/.orchestrator/runs

@@ -73,7 +73,12 @@ def start(
         raise typer.Exit(1)
 
     mode = "demo" if demo else cfg.executor_mode
-    executor = make_executor(mode, cfg.claude_cli_path)
+    executor = make_executor(
+        mode,
+        cfg.claude_cli_path,
+        provider=cfg.executor_provider,
+        codex_cli_path=cfg.codex_cli_path,
+    )
 
     # Resolve planner (stub in demo mode if no key)
     if mode == "demo" and not cfg.openai_api_key:
@@ -178,7 +183,12 @@ def resume(
         raise typer.Exit(0)
 
     mode = "demo" if demo else cfg.executor_mode
-    executor = make_executor(mode, cfg.claude_cli_path)
+    executor = make_executor(
+        mode,
+        cfg.claude_cli_path,
+        provider=cfg.executor_provider,
+        codex_cli_path=cfg.codex_cli_path,
+    )
     planner = _make_planner(cfg)
 
     console.print(f"[green]Resuming run:[/green] {store.run_id}")
@@ -222,7 +232,12 @@ def review(
         raise typer.Exit(0)
 
     mode = cfg.executor_mode
-    executor = make_executor(mode, cfg.claude_cli_path)
+    executor = make_executor(
+        mode,
+        cfg.claude_cli_path,
+        provider=cfg.executor_provider,
+        codex_cli_path=cfg.codex_cli_path,
+    )
     planner = _make_planner(cfg)
 
     console.print(f"[green]Reviewing run:[/green] {store.run_id}")
