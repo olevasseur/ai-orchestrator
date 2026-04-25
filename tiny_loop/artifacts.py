@@ -13,8 +13,12 @@ Harness-owned packaging artifacts:
 from __future__ import annotations
 
 import subprocess
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+ARCHIVE_FILE_THRESHOLD = 10
 
 
 def _git_diff_stat(repo: str, start_commit: str) -> str:
@@ -264,3 +268,26 @@ def update_summary_repo_state(
         existing += "\n"
     summary_path.write_text(existing + "\n".join(lines))
     return True
+
+
+def archive_run_dir(
+    out: Path, threshold: int = ARCHIVE_FILE_THRESHOLD
+) -> Path | None:
+    """Zip the run directory into a sibling archive when it has many files.
+
+    Returns the archive path when created, None when below threshold or
+    the directory is empty/missing. Existing archives are overwritten so
+    the file count and zip stay consistent across re-finalisation.
+    """
+    if not out.exists() or not out.is_dir():
+        return None
+
+    files = [p for p in out.rglob("*") if p.is_file()]
+    if len(files) < threshold:
+        return None
+
+    archive_path = out.parent / f"{out.name}.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in files:
+            zf.write(p, arcname=p.relative_to(out.parent))
+    return archive_path

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from tiny_loop.artifacts import package_artifacts
+from tiny_loop.artifacts import archive_run_dir, package_artifacts
 from tiny_loop.claude_runner import run_claude
 from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff, head_commit, files_changed_since
 from tiny_loop.prompts import build_initial_prompt, build_continuation_prompt
@@ -129,60 +129,33 @@ def run(
         print(f"  OpenAI response: {initial_plan.response_id}")
     print()
 
-    for i in range(max_iterations):
-        itr_num = i + 1
-        state["current_iteration"] = itr_num
-        print(f"── Iteration {itr_num}/{max_iterations} ──")
+    pending_exception: BaseException | None = None
+    try:
+        for i in range(max_iterations):
+            itr_num = i + 1
+            state["current_iteration"] = itr_num
+            print(f"── Iteration {itr_num}/{max_iterations} ──")
 
-        # 1. Build the Claude prompt
-        if itr_num == 1:
-            current_step = initial_plan.iteration_1_prompt
-            prompt = build_initial_prompt(
-                current_step, ctx, artifact_dir=str(out), json_mode=True,
-            )
-        else:
-            last_decision = state["iterations"][-1]["reviewer_decision"]
-            current_step = last_decision.get("next_prompt_for_claude") or objective
-            prompt = build_continuation_prompt(
-                objective, current_step, state["iterations"],
-                artifact_dir=str(out), json_mode=True,
-            )
+            # 1. Build the Claude prompt
+            if itr_num == 1:
+                current_step = initial_plan.iteration_1_prompt
+                prompt = build_initial_prompt(
+                    current_step, ctx, artifact_dir=str(out), json_mode=True,
+                )
+            else:
+                last_decision = state["iterations"][-1]["reviewer_decision"]
+                current_step = last_decision.get("next_prompt_for_claude") or objective
+                prompt = build_continuation_prompt(
+                    objective, current_step, state["iterations"],
+                    artifact_dir=str(out), json_mode=True,
+                )
 
-        # 2. Classify step type
-        step_type = classify_step(current_step)
-        print(f"  Step type: {step_type}")
+            # 2. Classify step type
+            step_type = classify_step(current_step)
+            print(f"  Step type: {step_type}")
 
-        # 3. Run Claude
-        print("  Running Claude...")
-        result = run_claude(
-            prompt, repo, timeout=claude_timeout, resume_session_id=session_id
-        )
-        session_id = result.session_id or session_id
-
-        abnormal = result.timed_out or result.exit_code != 0
-        has_diff = has_meaningful_diff(repo) if abnormal else True
-
-        if result.timed_out:
-            print(f"  Claude timed out (>{claude_timeout}s)")
-        elif result.exit_code != 0:
-            print(f"  Claude exited with code {result.exit_code}")
-        else:
-            print(f"  Claude completed (exit 0)")
-
-        # 3b. Retry policy — depends on step type
-        # Implementation/tests: retry only if abnormal + no diff (existing behavior)
-        # Validation/packaging: always retry on abnormal (these steps are low-risk)
-        retried = False
-        should_retry = False
-        if abnormal:
-            if step_type in ("validation", "packaging"):
-                should_retry = True  # always worth retrying non-code steps
-            elif not has_diff:
-                should_retry = True  # no code produced — safe to retry
-
-        if should_retry:
-            print(f"  {'Validation/packaging' if step_type in ('validation', 'packaging') else 'No meaningful diff'} — retrying same step once...")
-            retried = True
+            # 3. Run Claude
+            print("  Running Claude...")
             result = run_claude(
                 prompt, repo, timeout=claude_timeout, resume_session_id=session_id
             )
@@ -192,159 +165,210 @@ def run(
             has_diff = has_meaningful_diff(repo) if abnormal else True
 
             if result.timed_out:
-                print(f"  Retry timed out (>{claude_timeout}s)")
+                print(f"  Claude timed out (>{claude_timeout}s)")
             elif result.exit_code != 0:
-                print(f"  Retry exited with code {result.exit_code}")
+                print(f"  Claude exited with code {result.exit_code}")
             else:
-                print(f"  Retry completed (exit 0)")
+                print(f"  Claude completed (exit 0)")
 
-        # 3. Capture git diff
-        diff = diff_summary(repo)
+            # 3b. Retry policy — depends on step type
+            # Implementation/tests: retry only if abnormal + no diff (existing behavior)
+            # Validation/packaging: always retry on abnormal (these steps are low-risk)
+            retried = False
+            should_retry = False
+            if abnormal:
+                if step_type in ("validation", "packaging"):
+                    should_retry = True  # always worth retrying non-code steps
+                elif not has_diff:
+                    should_retry = True  # no code produced — safe to retry
 
-        # 5. Build abnormal execution context if needed
-        abnormal_execution = None
-        if abnormal:
-            abnormal_execution = {
-                "timed_out": result.timed_out,
-                "exit_code": result.exit_code,
-                "timeout_seconds": claude_timeout,
-                "has_meaningful_diff": has_diff,
-                "was_retried": retried,
-                "step_type": step_type,
-            }
+            if should_retry:
+                print(f"  {'Validation/packaging' if step_type in ('validation', 'packaging') else 'No meaningful diff'} — retrying same step once...")
+                retried = True
+                result = run_claude(
+                    prompt, repo, timeout=claude_timeout, resume_session_id=session_id
+                )
+                session_id = result.session_id or session_id
 
-        # 5. Build reviewer packet and call OpenAI
-        print("  Calling reviewer...")
-        packet = build_reviewer_packet(
-            objective=objective,
-            iteration_number=itr_num,
-            max_iterations=max_iterations,
-            claude_output=result.stdout,
-            git_diff=diff,
-            previous_summaries=state["iterations"],
-            current_step=current_step,
-            abnormal_execution=abnormal_execution,
-            json_mode=True,
-        )
+                abnormal = result.timed_out or result.exit_code != 0
+                has_diff = has_meaningful_diff(repo) if abnormal else True
 
-        decision = call_reviewer(
-            api_key, openai_model, packet,
-            previous_response_id=openai_response_id,
-        )
+                if result.timed_out:
+                    print(f"  Retry timed out (>{claude_timeout}s)")
+                elif result.exit_code != 0:
+                    print(f"  Retry exited with code {result.exit_code}")
+                else:
+                    print(f"  Retry completed (exit 0)")
 
-        # Update response chain
-        if decision.response_id:
-            openai_response_id = decision.response_id
-            thread = state["openai_thread"]
-            thread["latest_response_id"] = decision.response_id
-            thread["response_ids"].append(decision.response_id)
-            if decision.conversation_id:
-                thread["conversation_id"] = decision.conversation_id
+            # 3. Capture git diff
+            diff = diff_summary(repo)
 
-        print(f"  Decision: {decision.decision}")
-        print(f"  Rationale: {decision.rationale}")
-        if decision.risk_flags:
-            print(f"  Risks: {', '.join(decision.risk_flags)}")
+            # 5. Build abnormal execution context if needed
+            abnormal_execution = None
+            if abnormal:
+                abnormal_execution = {
+                    "timed_out": result.timed_out,
+                    "exit_code": result.exit_code,
+                    "timeout_seconds": claude_timeout,
+                    "has_meaningful_diff": has_diff,
+                    "was_retried": retried,
+                    "step_type": step_type,
+                }
 
-        # 6. Record iteration
-        record = new_iteration_record(
-            iteration=itr_num,
-            prompt=prompt,
-            claude_output=result.stdout,
-            claude_exit_code=result.exit_code,
-            claude_timed_out=result.timed_out,
-            claude_session_id=result.session_id,
-            git_diff=diff,
-            reviewer_packet=packet,
-            reviewer_decision=decision.to_dict(),
-        )
-        record["abnormal_execution"] = abnormal_execution
-        record["was_retried"] = retried
-        record["step_type"] = step_type
-        record["openai_response_id"] = decision.response_id
-        state["iterations"].append(record)
-        save_state(state, state_path)
+            # 5. Build reviewer packet and call OpenAI
+            print("  Calling reviewer...")
+            packet = build_reviewer_packet(
+                objective=objective,
+                iteration_number=itr_num,
+                max_iterations=max_iterations,
+                claude_output=result.stdout,
+                git_diff=diff,
+                previous_summaries=state["iterations"],
+                current_step=current_step,
+                abnormal_execution=abnormal_execution,
+                json_mode=True,
+            )
 
-        # 6. Check stop conditions
-        if decision.decision in TERMINAL_DECISIONS:
-            print(f"\n  Stopping: {decision.decision}")
-            state["status"] = decision.decision
-            state["final_outcome"] = decision.completion_assessment
-            break
+            decision = call_reviewer(
+                api_key, openai_model, packet,
+                previous_response_id=openai_response_id,
+            )
 
-        print()
-    else:
-        # Exhausted all iterations
-        print(f"\n  Hard stop: reached {max_iterations} iterations")
-        state["status"] = "max_iterations_reached"
-        state["final_outcome"] = (
-            state["iterations"][-1]["reviewer_decision"]["completion_assessment"]
-            if state["iterations"]
-            else "No iterations completed."
-        )
+            # Update response chain
+            if decision.response_id:
+                openai_response_id = decision.response_id
+                thread = state["openai_thread"]
+                thread["latest_response_id"] = decision.response_id
+                thread["response_ids"].append(decision.response_id)
+                if decision.conversation_id:
+                    thread["conversation_id"] = decision.conversation_id
 
-    state["ended_at"] = datetime.now(timezone.utc).isoformat()
-    save_state(state, state_path)
+            print(f"  Decision: {decision.decision}")
+            print(f"  Rationale: {decision.rationale}")
+            if decision.risk_flags:
+                print(f"  Risks: {', '.join(decision.risk_flags)}")
+
+            # 6. Record iteration
+            record = new_iteration_record(
+                iteration=itr_num,
+                prompt=prompt,
+                claude_output=result.stdout,
+                claude_exit_code=result.exit_code,
+                claude_timed_out=result.timed_out,
+                claude_session_id=result.session_id,
+                git_diff=diff,
+                reviewer_packet=packet,
+                reviewer_decision=decision.to_dict(),
+            )
+            record["abnormal_execution"] = abnormal_execution
+            record["was_retried"] = retried
+            record["step_type"] = step_type
+            record["openai_response_id"] = decision.response_id
+            state["iterations"].append(record)
+            save_state(state, state_path)
+
+            # 6. Check stop conditions
+            if decision.decision in TERMINAL_DECISIONS:
+                print(f"\n  Stopping: {decision.decision}")
+                state["status"] = decision.decision
+                state["final_outcome"] = decision.completion_assessment
+                break
+
+            print()
+        else:
+            # Exhausted all iterations
+            print(f"\n  Hard stop: reached {max_iterations} iterations")
+            state["status"] = "max_iterations_reached"
+            state["final_outcome"] = (
+                state["iterations"][-1]["reviewer_decision"]["completion_assessment"]
+                if state["iterations"]
+                else "No iterations completed."
+            )
+    except Exception as exc:
+        # Loop crashed mid-flight (e.g. reviewer rate-limit, network blip).
+        # Record the failure on state, then fall through to the finally block
+        # so packaging + zip still run. The exception is re-raised below so the
+        # CLI still exits non-zero.
+        print(f"\n  Run errored: {type(exc).__name__}: {exc}", file=sys.stderr)
+        state["status"] = "errored"
+        state["error"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "iteration": state.get("current_iteration"),
+        }
+        pending_exception = exc
 
     summary_path = out / "summary.md"
-
-    # Collect repo files changed during the sprint (for state record)
-    changed_files = files_changed_since(repo, start_commit) if start_commit else []
-    state["files_changed"] = changed_files
-
-    # Post-run packaging: generate harness-owned artifacts
-    print("\n  Packaging artifacts...")
-    package_artifacts(repo, out, start_commit, state)
-
-    # Collect all sprint artifacts:
-    # 1. Harness output directory (state.json, summary.md, and the artifacts/
-    #    subdirectory where Claude was told to write smoke outputs).
-    harness_artifacts = sorted(str(p) for p in out.rglob("*") if p.is_file())
-
-    # 2. Legacy fallback: new /tmp entries created during the sprint.
-    # Claude is now instructed to write artifacts under out/artifacts/, but
-    # older prompts or unexpected writes may still land in /tmp.  We keep this
-    # sweep as a safety net but scope it narrowly: only top-level directories
-    # whose name looks project-related (contains "platform-graph", "smoke",
-    # or the project name) are included, to avoid picking up unrelated files.
-    tmp_after = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
-    new_tmp_entries = sorted(
-        str(p) for p in (tmp_after - tmp_before)
-        if p != out and p != tiny_loop_root and tiny_loop_root not in p.parents
-    )
-    external_artifacts = []
-    for entry in new_tmp_entries:
-        p = Path(entry)
-        try:
-            if p.is_file():
-                if p.stat().st_mtime >= sprint_start_mtime:
-                    external_artifacts.append(str(p))
-            elif p.is_dir():
-                for f in sorted(p.rglob("*")):
-                    if f.is_file() and f.stat().st_mtime >= sprint_start_mtime:
-                        external_artifacts.append(str(f))
-        except OSError:
-            continue
-
-    all_artifacts = harness_artifacts + external_artifacts
-    state["artifacts"] = all_artifacts
-
-    # If the run dir has accumulated a lot of files, zip it for easier upload.
     archive_path: Path | None = None
-    if len(harness_artifacts) >= 20:
-        import zipfile
-        archive_path = out.parent / f"{out.name}.zip"
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in out.rglob("*"):
+    all_artifacts: list[str] = []
+    harness_artifacts: list[str] = []
+
+    try:
+        state["ended_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(state, state_path)
+
+        # Collect repo files changed during the sprint (for state record)
+        changed_files = files_changed_since(repo, start_commit) if start_commit else []
+        state["files_changed"] = changed_files
+
+        # Post-run packaging: generate harness-owned artifacts
+        print("\n  Packaging artifacts...")
+        try:
+            package_artifacts(repo, out, start_commit, state)
+        except Exception as pkg_exc:
+            # Packaging is best-effort during finalisation — never let it
+            # mask the original loop exception or block the zip step.
+            print(f"  package_artifacts failed: {pkg_exc}", file=sys.stderr)
+
+        # Collect all sprint artifacts:
+        # 1. Harness output directory (state.json, summary.md, and the artifacts/
+        #    subdirectory where Claude was told to write smoke outputs).
+        harness_artifacts = sorted(str(p) for p in out.rglob("*") if p.is_file())
+
+        # 2. Legacy fallback: new /tmp entries created during the sprint.
+        # Claude is now instructed to write artifacts under out/artifacts/, but
+        # older prompts or unexpected writes may still land in /tmp.  We keep this
+        # sweep as a safety net but scope it narrowly: only top-level directories
+        # whose name looks project-related (contains "platform-graph", "smoke",
+        # or the project name) are included, to avoid picking up unrelated files.
+        tmp_after = set(Path("/tmp").iterdir()) if Path("/tmp").exists() else set()
+        new_tmp_entries = sorted(
+            str(p) for p in (tmp_after - tmp_before)
+            if p != out and p != tiny_loop_root and tiny_loop_root not in p.parents
+        )
+        external_artifacts = []
+        for entry in new_tmp_entries:
+            p = Path(entry)
+            try:
                 if p.is_file():
-                    zf.write(p, arcname=p.relative_to(out.parent))
-        state["archive"] = str(archive_path)
+                    if p.stat().st_mtime >= sprint_start_mtime:
+                        external_artifacts.append(str(p))
+                elif p.is_dir():
+                    for f in sorted(p.rglob("*")):
+                        if f.is_file() and f.stat().st_mtime >= sprint_start_mtime:
+                            external_artifacts.append(str(f))
+            except OSError:
+                continue
 
-    # Write human-readable summary (after files_changed, artifacts, and archive
-    # are populated so they appear in the markdown).
-    _write_summary(state, summary_path)
+        all_artifacts = harness_artifacts + external_artifacts
+        state["artifacts"] = all_artifacts
 
-    save_state(state, state_path)
+        # If the run dir has accumulated a lot of files, zip it for easier upload.
+        archive_path = archive_run_dir(out)
+        if archive_path is not None:
+            state["archive"] = str(archive_path)
+
+        # Write human-readable summary (after files_changed, artifacts, and archive
+        # are populated so they appear in the markdown).
+        _write_summary(state, summary_path)
+
+        save_state(state, state_path)
+    except Exception as fin_exc:
+        # Finalisation itself failed.  Surface the original loop exception
+        # if any, otherwise the finalisation error.
+        print(f"  Finalisation failed: {fin_exc}", file=sys.stderr)
+        if pending_exception is None:
+            pending_exception = fin_exc
 
     print(f"\n{'=' * 50}")
     print(f"Run complete.")
@@ -359,6 +383,10 @@ def run(
         for f in all_artifacts:
             print(f"    {f}")
     print(f"{'=' * 50}")
+
+    if pending_exception is not None:
+        raise pending_exception
+
     return state
 
 

@@ -3,14 +3,17 @@
 import os
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from tiny_loop.artifacts import (
+    ARCHIVE_FILE_THRESHOLD,
     _git_changed_files,
     _git_diff_stat,
+    archive_run_dir,
     generate_diff_stat,
     package_artifacts,
     update_summary_repo_state,
@@ -547,3 +550,69 @@ class TestSummaryOrdering:
         # Pre-packaging content was preserved, not overwritten
         assert final_text.startswith(pre_packaging_text.rstrip() + "\n") or \
             pre_packaging_text.rstrip() in final_text
+
+
+class TestArchiveRunDir:
+    def test_returns_none_when_below_threshold(self, tmp_path):
+        for i in range(ARCHIVE_FILE_THRESHOLD - 1):
+            (tmp_path / f"f{i}.txt").write_text(str(i))
+        assert archive_run_dir(tmp_path) is None
+        assert not (tmp_path.parent / f"{tmp_path.name}.zip").exists()
+
+    def test_creates_zip_at_threshold(self, tmp_path):
+        for i in range(ARCHIVE_FILE_THRESHOLD):
+            (tmp_path / f"f{i}.txt").write_text(str(i))
+
+        archive = archive_run_dir(tmp_path)
+
+        assert archive is not None
+        assert archive == tmp_path.parent / f"{tmp_path.name}.zip"
+        assert archive.exists()
+        with zipfile.ZipFile(archive) as zf:
+            assert len(zf.namelist()) == ARCHIVE_FILE_THRESHOLD
+
+    def test_includes_nested_files(self, tmp_path):
+        nested = tmp_path / "artifacts" / "smoke"
+        nested.mkdir(parents=True)
+        for i in range(ARCHIVE_FILE_THRESHOLD):
+            (nested / f"n{i}.log").write_text("x")
+
+        archive = archive_run_dir(tmp_path)
+
+        assert archive is not None
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+        assert any("artifacts/smoke/n0.log" in n for n in names)
+        # Arc names are relative to the run dir's parent so the run-dir
+        # name is preserved at the top of the zip.
+        assert all(n.startswith(f"{tmp_path.name}/") for n in names)
+
+    def test_returns_none_on_missing_dir(self, tmp_path):
+        assert archive_run_dir(tmp_path / "does-not-exist") is None
+
+    def test_overwrites_existing_archive(self, tmp_path):
+        for i in range(ARCHIVE_FILE_THRESHOLD):
+            (tmp_path / f"f{i}.txt").write_text("v1")
+        first = archive_run_dir(tmp_path)
+        assert first is not None
+        first_size = first.stat().st_size
+
+        # Add more files and re-archive — the zip must reflect the new state.
+        for i in range(ARCHIVE_FILE_THRESHOLD, ARCHIVE_FILE_THRESHOLD + 5):
+            (tmp_path / f"f{i}.txt").write_text("v2")
+        second = archive_run_dir(tmp_path)
+
+        assert second == first
+        with zipfile.ZipFile(second) as zf:
+            assert len(zf.namelist()) == ARCHIVE_FILE_THRESHOLD + 5
+        assert second.stat().st_size != first_size
+
+    def test_custom_threshold(self, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        (tmp_path / "b.txt").write_text("b")
+        # Default threshold (10) → no archive.
+        assert archive_run_dir(tmp_path) is None
+        # Lower threshold → archive created.
+        archive = archive_run_dir(tmp_path, threshold=2)
+        assert archive is not None and archive.exists()
+
