@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-ARCHIVE_FILE_THRESHOLD = 10
+ARCHIVE_FILE_THRESHOLD = 20
 
 
 def _git_diff_stat(repo: str, start_commit: str) -> str:

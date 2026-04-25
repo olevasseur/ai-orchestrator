@@ -610,7 +610,7 @@ class TestArchiveRunDir:
     def test_custom_threshold(self, tmp_path):
         (tmp_path / "a.txt").write_text("a")
         (tmp_path / "b.txt").write_text("b")
-        # Default threshold (10) → no archive.
+        # Default threshold (20) → no archive.
         assert archive_run_dir(tmp_path) is None
         # Lower threshold → archive created.
         archive = archive_run_dir(tmp_path, threshold=2)
