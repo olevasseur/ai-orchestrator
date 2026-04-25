@@ -149,12 +149,11 @@ class DemoExecutor(BaseExecutor):
 
 class CodexExecutor(BaseExecutor):
     """
-    Experimental Codex CLI executor — scaffolding only.
+    Experimental Codex CLI executor.
 
-    The exact non-interactive invocation, output format, and session model
-    for the Codex CLI are not yet pinned down (see codex_executor_feasibility.md).
-    Construction is allowed so provider selection and config wiring can be
-    tested, but `run()` raises until a concrete adapter is implemented.
+    Invokes the Codex CLI's non-interactive `exec` subcommand. Session
+    continuation (resume_session_id) is not yet wired up — Codex's session
+    model differs from Claude's and needs its own design.
     """
 
     def __init__(self, codex_cli_path: str = "codex") -> None:
@@ -169,12 +168,121 @@ class CodexExecutor(BaseExecutor):
         log_stderr_path: str | None = None,
         resume_session_id: str | None = None,
     ) -> ExecutionResult:
-        raise NotImplementedError(
-            "Codex executor is experimental: provider selection is wired up "
-            "but the Codex CLI invocation (argv, output format, session "
-            "continuation) has not yet been implemented. Set "
-            "executor_provider=claude (the default) to run."
+        if resume_session_id:
+            raise NotImplementedError(
+                "Codex executor does not yet support session resumption; "
+                "resume_session_id must be None."
+            )
+
+        cmd = [
+            self.codex_cli_path,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            prompt,
+        ]
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        timed_out = False
+
+        stdout_file = open(log_stdout_path, "w") if log_stdout_path else None
+        stderr_file = open(log_stderr_path, "w") if log_stderr_path else None
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(Path(repo_path).resolve()),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            def _read_stream(stream, lines, file):
+                for line in stream:
+                    lines.append(line)
+                    if file:
+                        file.write(line)
+                        file.flush()
+
+            t_out = threading.Thread(
+                target=_read_stream, args=(proc.stdout, stdout_lines, stdout_file)
+            )
+            t_err = threading.Thread(
+                target=_read_stream, args=(proc.stderr, stderr_lines, stderr_file)
+            )
+            t_out.start()
+            t_err.start()
+
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                timed_out = True
+
+            t_out.join()
+            t_err.join()
+            exit_code = proc.returncode if not timed_out else -1
+
+        finally:
+            if stdout_file:
+                stdout_file.close()
+            if stderr_file:
+                stderr_file.close()
+
+        result_text, session_id = _parse_codex_jsonl(stdout_lines)
+
+        return ExecutionResult(
+            stdout=result_text,
+            stderr="".join(stderr_lines),
+            exit_code=exit_code,
+            timed_out=timed_out,
+            session_id=session_id,
         )
+
+
+def _parse_codex_jsonl(stdout_lines: list[str]) -> tuple[str, str]:
+    """Parse Codex `exec --json` JSONL stream.
+
+    Codex emits one JSON event per line. We extract:
+    - session_id from the `thread.started` event's `thread_id`
+    - result text from the last `item.completed` event whose item is an
+      `agent_message` (Codex may emit multiple turns / messages; the final
+      agent_message is the user-visible answer).
+
+    Falls back to raw concatenated stdout when the stream is not valid JSONL
+    (e.g. Codex was invoked without --json, or crashed before any event).
+    """
+    raw_stdout = "".join(stdout_lines)
+    session_id = ""
+    last_message = ""
+    saw_any_event = False
+
+    for line in stdout_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        saw_any_event = True
+        etype = event.get("type")
+        if etype == "thread.started":
+            session_id = event.get("thread_id", "") or session_id
+        elif etype == "item.completed":
+            item = event.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text", "")
+                if isinstance(text, str) and text:
+                    last_message = text
+
+    if not saw_any_event:
+        return raw_stdout, ""
+    return (last_message or raw_stdout), session_id
 
 
 def make_executor(

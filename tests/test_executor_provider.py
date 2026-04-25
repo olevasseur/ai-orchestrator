@@ -130,15 +130,112 @@ class TestMakeExecutorCodex:
         e = make_executor("cli", "claude", provider="codex", codex_cli_path="/opt/codex")
         assert e.codex_cli_path == "/opt/codex"
 
-    def test_codex_run_raises_not_implemented_with_clear_message(self, tmp_path: Path):
+    def test_codex_run_invokes_exec_subcommand(self, tmp_path: Path, monkeypatch):
+        # Verify run() shells out to `codex exec ... <prompt>` rather than the
+        # old NotImplementedError. We intercept Popen so no real CLI is needed.
+        import orchestrator.executor.cli_executor as mod
+
+        captured = {}
+
+        class FakeProc:
+            def __init__(self, *a, **kw):
+                captured["cmd"] = kw.get("args", a[0] if a else None)
+                captured["cwd"] = kw.get("cwd")
+                self.stdout = iter(["ok\n"])
+                self.stderr = iter([])
+                self.returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(mod.subprocess, "Popen", FakeProc)
+        e = make_executor("cli", provider="codex", codex_cli_path="codex")
+        result = e.run(prompt="hello", repo_path=str(tmp_path))
+        assert result.exit_code == 0
+        assert captured["cmd"][0] == "codex"
+        assert "exec" in captured["cmd"]
+        assert "--json" in captured["cmd"]
+        assert captured["cmd"][-1] == "hello"
+
+
+class TestCodexJSONLParsing:
+    """The Codex executor invokes `codex exec --json`, which emits one JSON
+    event per stdout line. The parser must surface the final agent message
+    as `stdout` and the `thread_id` as `session_id` — analogous to how
+    CLIExecutor pulls the `result` event from Claude's stream-json."""
+
+    def _run_with_fake_stdout(self, monkeypatch, tmp_path: Path, lines: list[str]):
+        import orchestrator.executor.cli_executor as mod
+
+        class FakeProc:
+            def __init__(self, *a, **kw):
+                self.stdout = iter(lines)
+                self.stderr = iter([])
+                self.returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(mod.subprocess, "Popen", FakeProc)
         e = make_executor("cli", provider="codex")
-        with pytest.raises(NotImplementedError) as exc_info:
-            e.run(prompt="hello", repo_path=str(tmp_path))
-        msg = str(exc_info.value).lower()
-        # Message must flag this as experimental and direct user back to Claude.
-        assert "codex" in msg
-        assert "experimental" in msg
-        assert "claude" in msg
+        return e.run(prompt="x", repo_path=str(tmp_path))
+
+    def test_extracts_thread_id_as_session_id(self, tmp_path: Path, monkeypatch):
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            '{"type":"thread.started","thread_id":"abc-123"}\n',
+            '{"type":"turn.started"}\n',
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}\n',
+            '{"type":"turn.completed","usage":{}}\n',
+        ])
+        assert result.session_id == "abc-123"
+        assert result.stdout == "hello"
+
+    def test_uses_last_agent_message_when_multiple(self, tmp_path: Path, monkeypatch):
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            '{"type":"thread.started","thread_id":"t1"}\n',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}\n',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}\n',
+            '{"type":"turn.completed"}\n',
+        ])
+        assert result.stdout == "final answer"
+        assert result.session_id == "t1"
+
+    def test_ignores_non_message_item_completed(self, tmp_path: Path, monkeypatch):
+        # Codex also emits item.completed for shell calls etc.; only
+        # agent_message items contribute to the surfaced result.
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            '{"type":"thread.started","thread_id":"t2"}\n',
+            '{"type":"item.completed","item":{"type":"shell_call","output":"ls"}}\n',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+        ])
+        assert result.stdout == "done"
+
+    def test_skips_blank_and_malformed_lines(self, tmp_path: Path, monkeypatch):
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            '\n',
+            'not json at all\n',
+            '{"type":"thread.started","thread_id":"t3"}\n',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n',
+        ])
+        assert result.session_id == "t3"
+        assert result.stdout == "ok"
+
+    def test_falls_back_to_raw_stdout_when_no_json_events(self, tmp_path: Path, monkeypatch):
+        # If Codex was somehow invoked without --json (or crashed before any
+        # event), we still want users to see whatever it printed.
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            "plain text line one\n",
+            "plain text line two\n",
+        ])
+        assert result.stdout == "plain text line one\nplain text line two\n"
+        assert result.session_id == ""
+
+    def test_session_id_empty_when_thread_started_missing(self, tmp_path: Path, monkeypatch):
+        result = self._run_with_fake_stdout(monkeypatch, tmp_path, [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}\n',
+        ])
+        assert result.session_id == ""
+        assert result.stdout == "hi"
 
 
 class TestMakeExecutorErrors:

@@ -155,6 +155,56 @@ To add the **Claude Agent SDK**, implement `BaseExecutor.run()` and set
 
 ---
 
+## Executor providers (Codex experimental)
+
+`executor_provider` selects the agent backend used by `executor_mode: cli`.
+Claude is the default and behaves exactly as before.
+
+| Provider | Status | Command shape |
+|---|---|---|
+| `claude` (default) | Stable | `claude --print --dangerously-skip-permissions --output-format stream-json <prompt>` |
+| `codex` | **Experimental** | `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <prompt>` |
+
+### ⚠️ Safety warning for the Codex provider
+
+The Codex provider invokes `codex exec` with
+`--dangerously-bypass-approvals-and-sandbox`. As Codex's own help text says:
+
+> Skip all confirmation prompts and execute commands without sandboxing.
+> EXTREMELY DANGEROUS. Intended solely for running in environments that
+> are externally sandboxed.
+
+This means Codex can run arbitrary shell commands, modify files anywhere
+the orchestrator process can reach, and make outbound network calls — with
+no per-action prompt. Treat it like running untrusted code as your user.
+
+**Use the Codex provider only when all of the following are true:**
+
+- The target repo is a disposable clone (VM, container, throwaway directory).
+- The host has no production credentials, SSH keys, or cloud tokens reachable
+  from the working user.
+- You explicitly want to evaluate Codex behavior; otherwise leave the
+  default (`executor_provider: claude`).
+
+Session resumption is not yet implemented for Codex; passing
+`resume_session_id` to `CodexExecutor.run()` raises `NotImplementedError`.
+
+### Smoke-testing real Codex
+
+A standalone script exercises the real `codex` binary against a fresh
+disposable repo and prints the resulting `ExecutionResult`:
+
+```bash
+.venv/bin/python scripts/smoke_test_codex.py
+```
+
+It refuses to run unless `CODEX_SMOKE_TEST_OK=1` is set, to make the
+"this will run dangerous Codex" step explicit. The unit tests in
+`tests/test_executor_provider.py` mock subprocess and do **not** require
+Codex to be installed.
+
+---
+
 ## Adding mobile / Slack approval (extension point)
 
 The review step lives in `orchestrator/ui/review.py :: run_review()`.

@@ -6,7 +6,16 @@ openai_model: gpt-4o
 
 # Executor settings
 executor_mode: cli            # cli | demo
-executor_provider: claude     # claude | codex (codex is experimental — see codex_executor_feasibility.md)
+executor_provider: claude     # claude | codex
+                              # codex is EXPERIMENTAL. It runs:
+                              #   codex exec --json --skip-git-repo-check \
+                              #              --dangerously-bypass-approvals-and-sandbox <prompt>
+                              # The --dangerously-bypass-approvals-and-sandbox flag disables
+                              # Codex's approval prompts AND its filesystem/network sandbox.
+                              # Only enable codex inside a disposable, externally-sandboxed
+                              # repo (VM, container, throwaway clone). Do NOT point it at
+                              # repos with secrets, production credentials, or shared state.
+                              # See README.md "Executor providers (Codex experimental)".
 claude_cli_path: claude       # path to the `claude` binary
 codex_cli_path: codex         # path to the `codex` binary (used when executor_provider: codex)
 
