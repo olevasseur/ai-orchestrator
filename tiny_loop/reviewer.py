@@ -1,4 +1,4 @@
-"""OpenAI reviewer: evaluates Claude's iteration output and decides next step.
+"""OpenAI reviewer: evaluates executor iteration output and decides next step.
 
 Uses the OpenAI Responses API with previous_response_id chaining so that
 a single sprint maintains conversational continuity across the initial
@@ -8,7 +8,7 @@ planner call and all subsequent reviewer calls.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Any
 
 from openai import OpenAI
@@ -18,7 +18,7 @@ You are an iteration planner for a bounded automation loop (max {max_iterations}
 
 You will receive a sprint brief (the high-level objective and constraints) and
 repository context. Your job is to produce ONLY the first bounded implementation
-step for a coding agent (Claude) to execute.
+step for a coding agent (the executor) to execute.
 
 Rules:
 - The first step must be the smallest coherent change that moves toward the objective.
@@ -32,7 +32,7 @@ Rules:
 
 Respond with a JSON object with exactly these keys:
 {{
-  "iteration_1_prompt": "concrete, bounded instruction for Claude's first step",
+  "iteration_1_prompt": "concrete, bounded instruction for the executor's first step",
   "rationale": "1-2 sentences on why this is the right first step",
   "expected_remaining_steps": "brief outline of what later iterations would cover"
 }}
@@ -42,15 +42,15 @@ Respond with a JSON object with exactly these keys:
 REVIEWER_SYSTEM_PROMPT = """\
 You are a code reviewer and iteration planner in a bounded automation loop.
 
-A coding agent (Claude) is implementing a sprint objective iteratively. Each
+A coding agent (the executor) is implementing a sprint objective iteratively. Each
 iteration has a specific bounded step. You receive the step that was assigned,
-Claude's output, a git diff, and the overall sprint objective.
+the executor's output, a git diff, and the overall sprint objective.
 
 Your job: decide what happens next.
 
 Decision policy (follow in order):
 
-1. stop_failure — Claude crashed, timed out, produced no useful changes, or is
+1. stop_failure — the executor crashed, timed out, produced no useful changes, or is
    stuck repeating the same failed approach.
 
 2. stop_success — The ENTIRE sprint objective is satisfied and validated. Every
@@ -81,38 +81,71 @@ Respond with a JSON object with exactly these keys:
 {
   "decision": "continue" | "pause_for_human" | "stop_success" | "stop_failure",
   "rationale": "1-2 sentence explanation",
-  "next_prompt_for_claude": "next narrow step for Claude (null if stopping/pausing)",
+  "next_prompt_for_executor": "next narrow step for the executor (null if stopping/pausing)",
   "risk_flags": ["short string", ...],
   "completion_assessment": "short assessment of overall progress toward the objective"
 }
 """
 
 
-@dataclass
+@dataclass(init=False)
 class ReviewerDecision:
     decision: str  # continue | pause_for_human | stop_success | stop_failure
     rationale: str
-    next_prompt_for_claude: str | None
+    next_prompt_for_executor: str | None
     risk_flags: list[str]
     completion_assessment: str
     response_id: str = ""
     conversation_id: str = ""
 
+    def __init__(
+        self,
+        decision: str,
+        rationale: str,
+        next_prompt_for_executor: str | None = None,
+        risk_flags: list[str] | None = None,
+        completion_assessment: str = "",
+        response_id: str = "",
+        conversation_id: str = "",
+        *,
+        next_prompt_for_claude: str | None = None,
+    ) -> None:
+        self.decision = decision
+        self.rationale = rationale
+        self.next_prompt_for_executor = (
+            next_prompt_for_executor
+            if next_prompt_for_executor is not None
+            else next_prompt_for_claude
+        )
+        self.risk_flags = risk_flags or []
+        self.completion_assessment = completion_assessment
+        self.response_id = response_id
+        self.conversation_id = conversation_id
+
+    @property
+    def next_prompt_for_claude(self) -> str | None:
+        """Legacy alias for existing callers and state consumers."""
+        return self.next_prompt_for_executor
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["next_prompt_for_claude"] = self.next_prompt_for_executor
+        return data
 
 
 def build_reviewer_packet(
     objective: str,
     iteration_number: int,
     max_iterations: int,
-    claude_output: str,
-    git_diff: str,
-    previous_summaries: list[dict],
+    executor_output: str | None = None,
+    git_diff: str = "",
+    previous_summaries: list[dict] | None = None,
     current_step: str = "",
     abnormal_execution: dict | None = None,
     *,
+    executor_label: str = "executor",
     json_mode: bool = False,
+    claude_output: str | None = None,
 ) -> str:
     """Build the user message for the reviewer.
 
@@ -122,6 +155,9 @@ def build_reviewer_packet(
             ``text={"format": {"type": "json_object"}}`` — the input message
             must contain the word 'json' or the API raises an error.
     """
+    if executor_output is None:
+        executor_output = claude_output or ""
+    previous_summaries = previous_summaries or []
     parts = []
 
     # Surface abnormal execution prominently at the top
@@ -130,11 +166,11 @@ def build_reviewer_packet(
         warning_lines = ["\n## ⚠ ABNORMAL EXECUTION WARNING"]
         if abnormal_execution.get("timed_out"):
             warning_lines.append(
-                f"Claude TIMED OUT after {abnormal_execution.get('timeout_seconds', '?')} seconds."
+                f"{executor_label} TIMED OUT after {abnormal_execution.get('timeout_seconds', '?')} seconds."
             )
         elif abnormal_execution.get("exit_code", 0) != 0:
             warning_lines.append(
-                f"Claude exited with NON-ZERO exit code {abnormal_execution['exit_code']}."
+                f"{executor_label} exited with NON-ZERO exit code {abnormal_execution['exit_code']}."
             )
         warning_lines.append(
             f"Output is likely INCOMPLETE or PARTIAL."
@@ -185,11 +221,11 @@ def build_reviewer_packet(
         )
         parts.append(f"\n## Previous iterations\n{summary_text}")
 
-    # Truncate Claude output to keep reviewer context manageable
-    truncated = claude_output[:8000]
-    if len(claude_output) > 8000:
+    # Truncate executor output to keep reviewer context manageable.
+    truncated = executor_output[:8000]
+    if len(executor_output) > 8000:
         truncated += "\n... [truncated]"
-    parts.append(f"\n## Claude output\n{truncated}")
+    parts.append(f"\n## Executor output ({executor_label})\n{truncated}")
 
     # Truncate diff similarly
     diff_truncated = git_diff[:4000]
@@ -243,6 +279,7 @@ def call_reviewer(
     return ReviewerDecision(
         decision=data.get("decision", "pause_for_human"),
         rationale=data.get("rationale", ""),
+        next_prompt_for_executor=data.get("next_prompt_for_executor"),
         next_prompt_for_claude=data.get("next_prompt_for_claude"),
         risk_flags=data.get("risk_flags", []),
         completion_assessment=data.get("completion_assessment", ""),

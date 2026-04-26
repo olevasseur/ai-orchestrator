@@ -14,6 +14,7 @@ This module has no CLI concerns — it's driven by the cli/ layer.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,8 @@ _FRAGILE_VALIDATION_PATTERNS = [
     "http://",      # any HTTP URL
     "https://",
 ]
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _warn_fragile_validation_commands(cmds: list[str]) -> list[str]:
@@ -186,7 +189,7 @@ class OrchestratorRunner:
                     timeout=self.config.executor_timeout,
                     log_stdout_path=str(itr_dir / "executor_stdout.log"),
                     log_stderr_path=str(itr_dir / "executor_stderr.log"),
-                    resume_session_id=run_state.executor_session_id or None,
+                    resume_session_id=self._resume_session_id_for_executor(run_state),
                 )
 
                 if result.session_id:
@@ -200,23 +203,34 @@ class OrchestratorRunner:
                     itr_n, result.stdout, result.stderr, result.exit_code
                 )
 
-                diff = git_utils.diff_summary(run_state.repo_path)
-                self.store.write_git_diff(itr_n, diff)
-
                 # Codex worktree mode: the source repo is intentionally untouched,
-                # so `git diff` above is empty. The real changeset lives on
+                # so `git diff` would otherwise be empty. The real changeset lives on
                 # result.diff, captured inside the disposable worktree. Persist
-                # it as the human-applyable patch artifact and surface it.
+                # it as the human-reviewable patch artifact. If explicitly
+                # enabled, apply it only after `git apply --check` succeeds.
                 if result.diff or result.workspace_path:
                     diff_path = self.store.write_codex_workspace(
                         itr_n, result.diff, result.workspace_path
+                    )
+                    patch_status, patch_detail = self._handle_codex_patch(
+                        result.diff,
+                        diff_path,
+                        run_state.repo_path,
+                    )
+                    self.store.write_codex_patch_status(
+                        itr_n, patch_status, patch_detail
                     )
                     ui.show_codex_patch(
                         result.diff,
                         result.workspace_path,
                         diff_path,
                         run_state.repo_path,
+                        patch_status,
+                        patch_detail,
                     )
+
+                diff = git_utils.diff_summary(run_state.repo_path)
+                self.store.write_git_diff(itr_n, diff)
 
                 # Checkpoint execution findings before validation so they survive
                 # if validation is interrupted (see clear_exec_note at end of loop).
@@ -304,6 +318,80 @@ class OrchestratorRunner:
             from rich.prompt import Confirm
             if not Confirm.ask("Proceed with execution anyway?", default=True):
                 raise RuntimeError("User aborted: uncommitted changes in repo.")
+
+    def _resume_session_id_for_executor(self, run_state: RunState) -> str | None:
+        """Return the session id only for providers that support native resume.
+
+        Codex may emit a thread id, and we still persist it on RunState as
+        executor_session_id for traceability. The Codex adapter does not yet
+        support taking that id back as resume_session_id, so continuity for
+        Codex comes from the planner prompt: recent iteration summaries,
+        validation summaries, repo context, and working memory are fed into the
+        next iteration by _call_planner().
+        """
+        if self.config.executor_provider == "claude":
+            return run_state.executor_session_id or None
+        return None
+
+    def _handle_codex_patch(
+        self,
+        diff: str,
+        diff_path: Path | None,
+        repo_path: str,
+    ) -> tuple[str, str]:
+        """Check and optionally apply a persisted Codex worktree diff.
+
+        Returns (status, detail), where status is one of applied/skipped/failed.
+        Applying is deliberately opt-in only: either executor_apply_policy=auto
+        or TINY_LOOP_APPLY_CODEX_DIFFS=1 must be set.
+        """
+        if not diff:
+            return "skipped", "Codex produced no diff."
+        if diff_path is None:
+            return "failed", "Codex produced a diff but no diff artifact was written."
+
+        check = subprocess.run(
+            ["git", "-C", repo_path, "apply", "--check", str(diff_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if check.returncode != 0:
+            return "failed", (check.stderr or check.stdout).strip()
+
+        policy = self._effective_codex_apply_policy()
+        if policy != "auto":
+            return "skipped", f"Patch check passed; apply policy is {policy!r}."
+
+        dirty = subprocess.run(
+            ["git", "-C", repo_path, "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if dirty.returncode != 0:
+            return "failed", (dirty.stderr or dirty.stdout).strip()
+        if dirty.stdout.strip():
+            return (
+                "failed",
+                "Refusing to apply Codex patch because target repo has "
+                "uncommitted changes.",
+            )
+
+        apply = subprocess.run(
+            ["git", "-C", repo_path, "apply", str(diff_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if apply.returncode != 0:
+            return "failed", (apply.stderr or apply.stdout).strip()
+        return "applied", "Patch applied to target repo."
+
+    def _effective_codex_apply_policy(self) -> str:
+        if os.environ.get("TINY_LOOP_APPLY_CODEX_DIFFS", "").lower() in _TRUE_ENV_VALUES:
+            return "auto"
+        return getattr(self.config, "executor_apply_policy", "manual")
 
     def _call_planner(self, run_state: RunState, itr_n: int) -> dict:
         task = self.store.read_task()

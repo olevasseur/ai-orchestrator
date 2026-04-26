@@ -142,13 +142,14 @@ def show_codex_patch(
     workspace_path: str,
     diff_path,
     repo_path: str,
+    patch_status: str = "",
+    patch_detail: str = "",
 ) -> None:
     """Surface a Codex worktree-mode patch to the human reviewer.
 
-    Codex ran in a disposable worktree, so the real repo at ``repo_path`` is
-    untouched. The diff is the handoff artifact: nothing is applied
-    automatically. We show a preview, the on-disk patch path, and the exact
-    `git apply` command the human can run to land the changes.
+    Codex ran in a disposable worktree. We show a preview, the on-disk patch
+    path, and either the apply status or the exact `git apply` command the
+    human can run to land the changes.
     """
     console.print(
         Rule("[bold magenta]Codex worktree patch (review required)[/bold magenta]")
@@ -171,14 +172,20 @@ def show_codex_patch(
     )
     if diff_path:
         console.print(f"[dim]Patch saved to:[/dim] {diff_path}")
+        if patch_status == "applied":
+            console.print("[green]Patch applied to the source repo.[/green]")
+        else:
+            console.print(
+                "[bold]Apply manually with:[/bold]\n"
+                f"  [cyan]git -C {repo_path} apply {diff_path}[/cyan]"
+            )
+    if patch_status == "failed":
+        console.print(f"[red]Patch apply check failed:[/red] {patch_detail}")
+    elif patch_status != "applied":
         console.print(
-            "[bold]Apply manually with:[/bold]\n"
-            f"  [cyan]git -C {repo_path} apply {diff_path}[/cyan]"
+            "[yellow]No automatic apply — the source repo is untouched until "
+            "you run the command above.[/yellow]"
         )
-    console.print(
-        "[yellow]No automatic apply — the source repo is untouched until "
-        "you run the command above.[/yellow]"
-    )
 
 
 def show_memory_saturation(status: dict) -> None:

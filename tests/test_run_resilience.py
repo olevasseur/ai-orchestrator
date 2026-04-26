@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
+from orchestrator.executor.base import ExecutionResult
 from tiny_loop import run as run_module
 from tiny_loop.artifacts import ARCHIVE_FILE_THRESHOLD
-from tiny_loop.claude_runner import ClaudeResult
 from tiny_loop.reviewer import PlannerResult
 
 
@@ -41,13 +41,25 @@ def _planner_stub() -> PlannerResult:
     )
 
 
-def _claude_stub() -> ClaudeResult:
-    return ClaudeResult(
-        stdout="claude said hello",
-        stderr="",
-        exit_code=0,
-        session_id="sess_1",
-    )
+class _ExecutorStub:
+    provider = "claude"
+    workspace_strategy = "inplace"
+    apply_policy = "manual"
+    timeout = 600
+    display_name = "Claude"
+    uses_isolated_workspace = False
+
+    def run(self, prompt, repo_path, *, resume_session_id=None):
+        return ExecutionResult(
+            stdout="executor said hello",
+            stderr="",
+            exit_code=0,
+            session_id="sess_1",
+        )
+
+
+def _executor_stub() -> _ExecutorStub:
+    return _ExecutorStub()
 
 
 class TestFinalisationOnReviewerCrash:
@@ -58,7 +70,7 @@ class TestFinalisationOnReviewerCrash:
 
         with (
             patch.object(run_module, "call_initial_planner", return_value=_planner_stub()),
-            patch.object(run_module, "run_claude", return_value=_claude_stub()),
+            patch.object(run_module, "build_tiny_loop_executor", return_value=_executor_stub()),
             patch.object(
                 run_module, "call_reviewer",
                 side_effect=RuntimeError("rate-limit boom"),
@@ -85,7 +97,7 @@ class TestFinalisationOnReviewerCrash:
 
         with (
             patch.object(run_module, "call_initial_planner", return_value=_planner_stub()),
-            patch.object(run_module, "run_claude", return_value=_claude_stub()),
+            patch.object(run_module, "build_tiny_loop_executor", return_value=_executor_stub()),
             patch.object(
                 run_module, "call_reviewer",
                 side_effect=RuntimeError("boom"),
@@ -119,7 +131,7 @@ class TestFinalisationOnReviewerCrash:
 
         with (
             patch.object(run_module, "call_initial_planner", return_value=_planner_stub()),
-            patch.object(run_module, "run_claude", return_value=_claude_stub()),
+            patch.object(run_module, "build_tiny_loop_executor", return_value=_executor_stub()),
             patch.object(
                 run_module, "call_reviewer",
                 side_effect=RuntimeError("boom"),
@@ -168,7 +180,7 @@ class TestFinalisationOnNormalExit:
 
         with (
             patch.object(run_module, "call_initial_planner", return_value=_planner_stub()),
-            patch.object(run_module, "run_claude", return_value=_claude_stub()),
+            patch.object(run_module, "build_tiny_loop_executor", return_value=_executor_stub()),
             patch.object(run_module, "call_reviewer", return_value=decision),
         ):
             run_module.run(

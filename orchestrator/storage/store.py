@@ -158,14 +158,29 @@ class RunStore:
             (d / "codex_workspace_path.txt").write_text(workspace_path)
         return diff_path
 
+    def write_codex_patch_status(
+        self,
+        n: int,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        d = self.iteration_dir(n)
+        (d / "codex_patch_status.txt").write_text(status)
+        if detail:
+            (d / "codex_patch_status_detail.txt").write_text(detail)
+
     def read_codex_workspace(self, n: int) -> dict:
         d = self.iteration_dir(n)
         diff_p = d / "codex_workspace.diff"
         path_p = d / "codex_workspace_path.txt"
+        status_p = d / "codex_patch_status.txt"
+        detail_p = d / "codex_patch_status_detail.txt"
         return {
             "diff": diff_p.read_text() if diff_p.exists() else "",
             "diff_path": str(diff_p) if diff_p.exists() else "",
             "workspace_path": path_p.read_text() if path_p.exists() else "",
+            "patch_status": status_p.read_text() if status_p.exists() else "",
+            "patch_status_detail": detail_p.read_text() if detail_p.exists() else "",
         }
 
     def write_validation_output(self, n: int, stdout: str, stderr: str) -> None:
@@ -195,6 +210,8 @@ class RunStore:
             ("git_diff", "git_diff.txt"),
             ("codex_workspace_diff", "codex_workspace.diff"),
             ("codex_workspace_path", "codex_workspace_path.txt"),
+            ("codex_patch_status", "codex_patch_status.txt"),
+            ("codex_patch_status_detail", "codex_patch_status_detail.txt"),
             ("validation_stdout", "validation_stdout.log"),
         ]:
             p = d / fname

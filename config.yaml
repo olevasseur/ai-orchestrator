@@ -6,7 +6,7 @@ openai_model: gpt-4o
 
 # Executor settings
 executor_mode: cli            # cli | demo
-executor_provider: claude     # claude | codex
+executor_provider: codex      # claude | codex
                               # codex is EXPERIMENTAL. It runs:
                               #   codex exec --json --skip-git-repo-check \
                               #              --dangerously-bypass-approvals-and-sandbox <prompt>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tiny_loop: bounded Claude ↔ OpenAI iteration loop.
+tiny_loop: bounded executor ↔ OpenAI iteration loop.
 
 Usage:
     python -m tiny_loop.run --repo /path/to/repo --objective "Implement feature X"
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from tiny_loop.artifacts import archive_run_dir, package_artifacts
-from tiny_loop.claude_runner import run_claude
+from tiny_loop.executor_adapter import (
+    build_tiny_loop_executor,
+    write_workspace_diff_artifact,
+)
 from tiny_loop.git_helpers import repo_context, diff_summary, has_meaningful_diff, head_commit, files_changed_since
 from tiny_loop.prompts import build_initial_prompt, build_continuation_prompt
 from tiny_loop.reviewer import build_reviewer_packet, call_reviewer, call_initial_planner
@@ -26,6 +30,7 @@ from tiny_loop.state import new_run_state, new_iteration_record, save_state
 
 
 TERMINAL_DECISIONS = {"pause_for_human", "stop_success", "stop_failure"}
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 # Keywords used to classify iteration steps by type.
 _VALIDATION_KEYWORDS = [
@@ -42,6 +47,102 @@ _TEST_KEYWORDS = [
     "add test", "add focused test", "add targeted test", "add unit test",
     "write test", "create test", "test coverage", "tests for",
 ]
+
+
+def _next_prompt_for_executor(decision: dict, default: str) -> str:
+    """Read the generic next-step field, falling back to the legacy alias."""
+    return (
+        decision.get("next_prompt_for_executor")
+        or decision.get("next_prompt_for_claude")
+        or default
+    )
+
+
+def _with_reviewer_decision_aliases(decision: dict) -> dict:
+    """Preserve legacy reviewer keys while exposing generic executor keys."""
+    aliased = dict(decision)
+    if "next_prompt_for_executor" not in aliased:
+        aliased["next_prompt_for_executor"] = aliased.get("next_prompt_for_claude")
+    if "next_prompt_for_claude" not in aliased:
+        aliased["next_prompt_for_claude"] = aliased.get("next_prompt_for_executor")
+    return aliased
+
+
+def _with_iteration_aliases(record: dict) -> dict:
+    """Preserve legacy claude_* keys while exposing generic executor_* keys."""
+    aliases = {
+        "executor_output": "claude_output",
+        "executor_exit_code": "claude_exit_code",
+        "executor_timed_out": "claude_timed_out",
+        "executor_session_id": "claude_session_id",
+    }
+    for executor_key, claude_key in aliases.items():
+        if executor_key not in record:
+            record[executor_key] = record.get(claude_key)
+        if claude_key not in record:
+            record[claude_key] = record.get(executor_key)
+    return record
+
+
+def _effective_codex_apply_policy(executor) -> str:
+    if os.environ.get("TINY_LOOP_APPLY_CODEX_DIFFS", "").lower() in _TRUE_ENV_VALUES:
+        return "auto"
+    return getattr(executor, "apply_policy", "manual")
+
+
+def _handle_codex_worktree_patch(
+    *,
+    executor,
+    result,
+    diff_path: str,
+    repo_path: str,
+) -> tuple[str, str]:
+    """Check and optionally apply a Codex worktree diff to the source repo."""
+    if getattr(executor, "provider", "") != "codex":
+        return "skipped", "Executor provider is not codex."
+    if getattr(executor, "workspace_strategy", "") != "worktree":
+        return "skipped", "Executor workspace strategy is not worktree."
+    if not getattr(result, "diff", ""):
+        return "skipped", "Codex produced no diff."
+    if not diff_path:
+        return "failed", "Codex produced a diff but no diff artifact was written."
+
+    check = subprocess.run(
+        ["git", "-C", repo_path, "apply", "--check", diff_path],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if check.returncode != 0:
+        return "failed", (check.stderr or check.stdout).strip()
+
+    policy = _effective_codex_apply_policy(executor)
+    if policy != "auto":
+        return "skipped", f"Patch check passed; apply policy is {policy!r}."
+
+    dirty = subprocess.run(
+        ["git", "-C", repo_path, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if dirty.returncode != 0:
+        return "failed", (dirty.stderr or dirty.stdout).strip()
+    if dirty.stdout.strip():
+        return (
+            "failed",
+            "Refusing to apply Codex patch because target repo has uncommitted changes.",
+        )
+
+    apply = subprocess.run(
+        ["git", "-C", repo_path, "apply", diff_path],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if apply.returncode != 0:
+        return "failed", (apply.stderr or apply.stdout).strip()
+    return "applied", "Patch applied to target repo."
 
 
 def classify_step(step_text: str) -> str:
@@ -67,7 +168,7 @@ def run(
     output_dir: str | None = None,
     openai_api_key: str | None = None,
     openai_model: str = "gpt-4o",
-    claude_timeout: int = 600,
+    claude_timeout: int | None = None,
 ) -> dict:
     """Execute the bounded iteration loop. Returns final state dict."""
 
@@ -87,12 +188,26 @@ def run(
     out.mkdir(parents=True, exist_ok=True)
     state_path = out / "state.json"
 
-    state = new_run_state(run_id, repo, objective, max_iterations)
+    executor = build_tiny_loop_executor(timeout_override=claude_timeout)
+    state = new_run_state(
+        run_id,
+        repo,
+        objective,
+        max_iterations,
+        executor_provider=executor.provider,
+        executor_workspace_strategy=executor.workspace_strategy,
+    )
+    state["executor_apply_policy"] = executor.apply_policy
+    state["executor_timeout"] = executor.timeout
     save_state(state, state_path)
 
     print(f"Run {run_id} started — max {max_iterations} iterations")
     print(f"Repo: {repo}")
     print(f"Output: {out}")
+    print(
+        f"Executor: {executor.provider}"
+        f" (workspace_strategy={executor.workspace_strategy})"
+    )
     print(f"Objective: {objective[:120]}{'...' if len(objective) > 120 else ''}")
     print()
 
@@ -136,7 +251,7 @@ def run(
             state["current_iteration"] = itr_num
             print(f"── Iteration {itr_num}/{max_iterations} ──")
 
-            # 1. Build the Claude prompt
+            # 1. Build the executor prompt
             if itr_num == 1:
                 current_step = initial_plan.iteration_1_prompt
                 prompt = build_initial_prompt(
@@ -144,7 +259,7 @@ def run(
                 )
             else:
                 last_decision = state["iterations"][-1]["reviewer_decision"]
-                current_step = last_decision.get("next_prompt_for_claude") or objective
+                current_step = _next_prompt_for_executor(last_decision, objective)
                 prompt = build_continuation_prompt(
                     objective, current_step, state["iterations"],
                     artifact_dir=str(out), json_mode=True,
@@ -154,22 +269,28 @@ def run(
             step_type = classify_step(current_step)
             print(f"  Step type: {step_type}")
 
-            # 3. Run Claude
-            print("  Running Claude...")
-            result = run_claude(
-                prompt, repo, timeout=claude_timeout, resume_session_id=session_id
+            # 3. Run configured executor
+            print(f"  Running {executor.display_name}...")
+            resume_session_id = (
+                session_id if getattr(executor, "supports_resume", False) else None
+            )
+            result = executor.run(
+                prompt, repo, resume_session_id=resume_session_id
             )
             session_id = result.session_id or session_id
 
             abnormal = result.timed_out or result.exit_code != 0
-            has_diff = has_meaningful_diff(repo) if abnormal else True
+            has_diff = (
+                bool(result.diff) if executor.uses_isolated_workspace
+                else has_meaningful_diff(repo)
+            ) if abnormal else True
 
             if result.timed_out:
-                print(f"  Claude timed out (>{claude_timeout}s)")
+                print(f"  {executor.display_name} timed out (>{executor.timeout}s)")
             elif result.exit_code != 0:
-                print(f"  Claude exited with code {result.exit_code}")
+                print(f"  {executor.display_name} exited with code {result.exit_code}")
             else:
-                print(f"  Claude completed (exit 0)")
+                print(f"  {executor.display_name} completed (exit 0)")
 
             # 3b. Retry policy — depends on step type
             # Implementation/tests: retry only if abnormal + no diff (existing behavior)
@@ -185,23 +306,52 @@ def run(
             if should_retry:
                 print(f"  {'Validation/packaging' if step_type in ('validation', 'packaging') else 'No meaningful diff'} — retrying same step once...")
                 retried = True
-                result = run_claude(
-                    prompt, repo, timeout=claude_timeout, resume_session_id=session_id
+                resume_session_id = (
+                    session_id if getattr(executor, "supports_resume", False) else None
+                )
+                result = executor.run(
+                    prompt, repo, resume_session_id=resume_session_id
                 )
                 session_id = result.session_id or session_id
 
                 abnormal = result.timed_out or result.exit_code != 0
-                has_diff = has_meaningful_diff(repo) if abnormal else True
+                has_diff = (
+                    bool(result.diff) if executor.uses_isolated_workspace
+                    else has_meaningful_diff(repo)
+                ) if abnormal else True
 
                 if result.timed_out:
-                    print(f"  Retry timed out (>{claude_timeout}s)")
+                    print(f"  Retry timed out (>{executor.timeout}s)")
                 elif result.exit_code != 0:
                     print(f"  Retry exited with code {result.exit_code}")
                 else:
                     print(f"  Retry completed (exit 0)")
 
-            # 3. Capture git diff
-            diff = diff_summary(repo)
+            # 4. Capture diff. Codex worktree mode returns an isolated-workspace
+            # diff; feed that to review and persist it as a run artifact.
+            workspace_diff_path = ""
+            codex_patch_status = ""
+            codex_patch_detail = ""
+            if result.diff:
+                workspace_diff_path = write_workspace_diff_artifact(
+                    result,
+                    out / "artifacts",
+                    itr_num,
+                    executor.provider,
+                )
+                codex_patch_status, codex_patch_detail = _handle_codex_worktree_patch(
+                    executor=executor,
+                    result=result,
+                    diff_path=workspace_diff_path,
+                    repo_path=repo,
+                )
+                if codex_patch_status == "applied":
+                    source_diff = diff_summary(repo)
+                    diff = result.diff if source_diff == "(no changes)" else source_diff
+                else:
+                    diff = result.diff
+            else:
+                diff = diff_summary(repo)
 
             # 5. Build abnormal execution context if needed
             abnormal_execution = None
@@ -209,10 +359,11 @@ def run(
                 abnormal_execution = {
                     "timed_out": result.timed_out,
                     "exit_code": result.exit_code,
-                    "timeout_seconds": claude_timeout,
+                    "timeout_seconds": executor.timeout,
                     "has_meaningful_diff": has_diff,
                     "was_retried": retried,
                     "step_type": step_type,
+                    "executor_provider": executor.provider,
                 }
 
             # 5. Build reviewer packet and call OpenAI
@@ -221,11 +372,12 @@ def run(
                 objective=objective,
                 iteration_number=itr_num,
                 max_iterations=max_iterations,
-                claude_output=result.stdout,
+                executor_output=result.stdout,
                 git_diff=diff,
                 previous_summaries=state["iterations"],
                 current_step=current_step,
                 abnormal_execution=abnormal_execution,
+                executor_label=executor.display_name,
                 json_mode=True,
             )
 
@@ -242,6 +394,7 @@ def run(
                 thread["response_ids"].append(decision.response_id)
                 if decision.conversation_id:
                     thread["conversation_id"] = decision.conversation_id
+            reviewer_decision = _with_reviewer_decision_aliases(decision.to_dict())
 
             print(f"  Decision: {decision.decision}")
             print(f"  Rationale: {decision.rationale}")
@@ -258,8 +411,18 @@ def run(
                 claude_session_id=result.session_id,
                 git_diff=diff,
                 reviewer_packet=packet,
-                reviewer_decision=decision.to_dict(),
+                reviewer_decision=reviewer_decision,
+                executor_provider=executor.provider,
+                executor_workspace_strategy=executor.workspace_strategy,
             )
+            _with_iteration_aliases(record)
+            if workspace_diff_path:
+                record["executor_workspace_diff_path"] = workspace_diff_path
+            if codex_patch_status:
+                record["codex_patch_status"] = codex_patch_status
+                record["codex_patch_detail"] = codex_patch_detail
+            if result.workspace_path:
+                record["executor_workspace_path"] = result.workspace_path
             record["abnormal_execution"] = abnormal_execution
             record["was_retried"] = retried
             record["step_type"] = step_type
@@ -322,11 +485,11 @@ def run(
 
         # Collect all sprint artifacts:
         # 1. Harness output directory (state.json, summary.md, and the artifacts/
-        #    subdirectory where Claude was told to write smoke outputs).
+        #    subdirectory where the executor was told to write smoke outputs).
         harness_artifacts = sorted(str(p) for p in out.rglob("*") if p.is_file())
 
         # 2. Legacy fallback: new /tmp entries created during the sprint.
-        # Claude is now instructed to write artifacts under out/artifacts/, but
+        # The executor is now instructed to write artifacts under out/artifacts/, but
         # older prompts or unexpected writes may still land in /tmp.  We keep this
         # sweep as a safety net but scope it narrowly: only top-level directories
         # whose name looks project-related (contains "platform-graph", "smoke",
@@ -420,10 +583,13 @@ def _write_summary(state: dict, path: Path) -> None:
 
     for itr in state["iterations"]:
         dec = itr["reviewer_decision"]
+        executor_exit_code = itr.get("executor_exit_code", itr.get("claude_exit_code"))
+        executor_output = itr.get("executor_output", itr.get("claude_output", ""))
         lines.extend([
             f"## Iteration {itr['iteration']}",
             f"",
-            f"**Claude exit code:** {itr['claude_exit_code']}",
+            f"**Executor:** {itr.get('executor_provider', state.get('executor_provider', 'claude'))}",
+            f"**Executor exit code:** {executor_exit_code}",
             f"**Reviewer decision:** {dec['decision']}",
             f"**Rationale:** {dec['rationale']}",
             f"**Assessment:** {dec['completion_assessment']}",
@@ -432,10 +598,10 @@ def _write_summary(state: dict, path: Path) -> None:
             lines.append(f"**Risks:** {', '.join(dec['risk_flags'])}")
         lines.extend([
             f"",
-            f"<details><summary>Claude output (click to expand)</summary>",
+            f"<details><summary>Executor output (click to expand)</summary>",
             f"",
             f"```",
-            itr["claude_output"][:3000],
+            executor_output[:3000],
             f"```",
             f"</details>",
             f"",
@@ -468,7 +634,7 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Bounded Claude ↔ OpenAI iteration loop."
+        description="Bounded executor ↔ OpenAI iteration loop."
     )
     parser.add_argument("--repo", required=True, help="Path to target repository.")
     parser.add_argument("--objective", default=None, help="Task objective (inline).")
@@ -481,7 +647,13 @@ def main():
     parser.add_argument("--output-dir", default=None, help="Override output directory.")
     parser.add_argument("--openai-model", default="gpt-4o", help="OpenAI model for reviewer.")
     parser.add_argument(
-        "--claude-timeout", type=int, default=600, help="Claude timeout in seconds."
+        "--claude-timeout",
+        type=int,
+        default=None,
+        help=(
+            "Executor timeout in seconds. Deprecated name kept for "
+            "backward compatibility; defaults to config executor_timeout."
+        ),
     )
 
     args = parser.parse_args()

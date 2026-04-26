@@ -1,4 +1,4 @@
-"""Prompt construction for Claude iterations."""
+"""Prompt construction for tiny_loop executor iterations."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def build_initial_prompt(
     artifact_dir: str | None = None,
     json_mode: bool = False,
 ) -> str:
-    """First iteration: give Claude a specific bounded step from the planner.
+    """First iteration: give the executor a specific bounded step.
 
     Args:
         step: The bounded implementation step for this iteration.

@@ -30,8 +30,8 @@ WORKSPACE_INPLACE = "inplace"
 WORKSPACE_WORKTREE = "worktree"
 _VALID_WORKSPACE_STRATEGIES = {WORKSPACE_INPLACE, WORKSPACE_WORKTREE}
 
-# Apply-policy values understood today. "auto" is reserved for a later sprint —
-# we deliberately raise rather than silently mutate the source repo.
+# Apply-policy values understood today. CodexExecutor only captures worktree
+# diffs; the runner owns any source-repo apply step after artifact persistence.
 APPLY_MANUAL = "manual"
 APPLY_DISCARD = "discard"
 APPLY_AUTO = "auto"
@@ -228,12 +228,6 @@ class CodexExecutor(BaseExecutor):
                 "Codex executor does not yet support session resumption; "
                 "resume_session_id must be None."
             )
-        if self.apply_policy == APPLY_AUTO:
-            raise NotImplementedError(
-                "executor_apply_policy='auto' is not implemented yet; "
-                "use 'manual' (review diff artifact and apply by hand) or 'discard'."
-            )
-
         if self.workspace_strategy == WORKSPACE_WORKTREE:
             return self._run_in_worktree(
                 prompt=prompt,

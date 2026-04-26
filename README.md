@@ -188,8 +188,18 @@ no per-action prompt. Treat it like running untrusted code as your user.
 - You explicitly want to evaluate Codex behavior; otherwise leave the
   default (`executor_provider: claude`).
 
-Session resumption is not yet implemented for Codex; passing
-`resume_session_id` to `CodexExecutor.run()` raises `NotImplementedError`.
+Session resumption is not yet implemented for Codex. The runner persists a
+Codex-emitted thread id as `executor_session_id` when one is present, but it
+does **not** pass that value back to `CodexExecutor.run()` because the adapter
+does not support native resume yet. Passing `resume_session_id` directly to
+`CodexExecutor.run()` still raises `NotImplementedError` as a guardrail.
+
+Until native Codex resume exists, continuity is prompt-based: each planner
+request includes recent iteration summaries, compact validation summaries,
+current repo context, project memory, working memory, and any saved execution
+note from an interrupted iteration. The next executor prompt is expected to be
+self-contained and derived from that context rather than from a resumed Codex
+session.
 
 ### Workspace strategy (provider-agnostic)
 

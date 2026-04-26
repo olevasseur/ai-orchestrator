@@ -20,6 +20,8 @@ from orchestrator.executor.cli_executor import (
     DemoExecutor,
     make_executor,
 )
+from orchestrator.jobs.models import RunState
+from orchestrator.jobs.runner import OrchestratorRunner
 from orchestrator.utils.config import Config
 
 
@@ -296,6 +298,26 @@ class TestSessionMetadataIsProviderOpaque:
         assert result.session_id == ""  # demo never issues session ids
 
 
+class TestRunnerSessionContinuity:
+    def test_claude_receives_stored_executor_session_id(self):
+        runner = OrchestratorRunner.__new__(OrchestratorRunner)
+        runner.config = Config(executor_provider="claude")
+        run_state = RunState(run_id="r", repo_path="/repo", executor_session_id="sess-1")
+
+        assert runner._resume_session_id_for_executor(run_state) == "sess-1"
+
+    def test_codex_does_not_receive_unsupported_resume_session_id(self):
+        runner = OrchestratorRunner.__new__(OrchestratorRunner)
+        runner.config = Config(executor_provider="codex")
+        run_state = RunState(
+            run_id="r",
+            repo_path="/repo",
+            executor_session_id="codex-thread-1",
+        )
+
+        assert runner._resume_session_id_for_executor(run_state) is None
+
+
 # ---------------------------------------------------------------------------
 # Codex worktree isolation
 # ---------------------------------------------------------------------------
@@ -558,19 +580,25 @@ class TestCodexExecutorValidation:
         with pytest.raises(ValueError, match="apply_policy"):
             CodexExecutor(apply_policy="bogus")
 
-    def test_apply_policy_auto_raises_not_implemented(
+    def test_apply_policy_auto_still_captures_worktree_diff(
         self, tmp_path: Path, monkeypatch
     ):
         src = tmp_path / "src"
         src.mkdir()
         _init_repo(src)
+        _patch_codex_popen(
+            monkeypatch,
+            edits=lambda cwd: (cwd / "hello.txt").write_text("changed\n"),
+        )
         e = CodexExecutor(
             workspace_strategy="worktree",
             worktree_base_dir=str(tmp_path / "wt"),
             apply_policy="auto",
         )
-        with pytest.raises(NotImplementedError, match="auto"):
-            e.run(prompt="x", repo_path=str(src))
+        res = e.run(prompt="x", repo_path=str(src))
+
+        assert "changed" in res.diff
+        assert (src / "hello.txt").read_text() == "original\n"
 
 
 class TestRunStorePersistsCodexWorkspace:
@@ -622,9 +650,126 @@ class TestRunStorePersistsCodexWorkspace:
         store = RunStore.create(str(tmp_path), str(tmp_path / "fake-repo"))
         store.write_executor_output(0, "out", "err", 0)
         store.write_codex_workspace(0, "DIFF", "/tmp/wt/p")
+        store.write_codex_patch_status(0, "skipped", "manual review required")
         eo = store.read_executor_output(0)
         assert eo["codex_workspace_diff"] == "DIFF"
         assert eo["codex_workspace_path"] == "/tmp/wt/p"
+        assert eo["codex_patch_status"] == "skipped"
+        assert eo["codex_patch_status_detail"] == "manual review required"
+
+
+class TestCodexPatchApplyPath:
+    def _runner(self, policy: str):
+        runner = object.__new__(OrchestratorRunner)
+        cfg = Config()
+        cfg.executor_apply_policy = policy
+        runner.config = cfg
+        return runner
+
+    def _write_patch(self, path: Path, text: str) -> Path:
+        path.write_text(text)
+        return path
+
+    def test_auto_apply_succeeds_when_explicitly_enabled(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        patch = self._write_patch(
+            tmp_path / "codex.diff",
+            "\n".join([
+                "diff --git a/new.txt b/new.txt",
+                "new file mode 100644",
+                "--- /dev/null",
+                "+++ b/new.txt",
+                "@@ -0,0 +1 @@",
+                "+created by codex",
+                "",
+            ]),
+        )
+
+        status, detail = self._runner("auto")._handle_codex_patch(
+            patch.read_text(), patch, str(repo)
+        )
+
+        assert status == "applied"
+        assert "applied" in detail.lower()
+        assert (repo / "new.txt").read_text() == "created by codex\n"
+
+    def test_manual_policy_skips_and_leaves_repo_unchanged(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        patch = self._write_patch(
+            tmp_path / "codex.diff",
+            "\n".join([
+                "diff --git a/new.txt b/new.txt",
+                "new file mode 100644",
+                "--- /dev/null",
+                "+++ b/new.txt",
+                "@@ -0,0 +1 @@",
+                "+created by codex",
+                "",
+            ]),
+        )
+
+        status, detail = self._runner("manual")._handle_codex_patch(
+            patch.read_text(), patch, str(repo)
+        )
+
+        assert status == "skipped"
+        assert "manual" in detail
+        assert not (repo / "new.txt").exists()
+
+    def test_apply_check_failure_is_safe(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        patch = self._write_patch(
+            tmp_path / "bad.diff",
+            "\n".join([
+                "diff --git a/missing.txt b/missing.txt",
+                "--- a/missing.txt",
+                "+++ b/missing.txt",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+                "",
+            ]),
+        )
+
+        status, detail = self._runner("auto")._handle_codex_patch(
+            patch.read_text(), patch, str(repo)
+        )
+
+        assert status == "failed"
+        assert detail
+        assert not (repo / "missing.txt").exists()
+
+    def test_auto_apply_refuses_dirty_target_repo(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        (repo / "dirty.txt").write_text("uncommitted\n")
+        patch = self._write_patch(
+            tmp_path / "codex.diff",
+            "\n".join([
+                "diff --git a/new.txt b/new.txt",
+                "new file mode 100644",
+                "--- /dev/null",
+                "+++ b/new.txt",
+                "@@ -0,0 +1 @@",
+                "+created by codex",
+                "",
+            ]),
+        )
+
+        status, detail = self._runner("auto")._handle_codex_patch(
+            patch.read_text(), patch, str(repo)
+        )
+
+        assert status == "failed"
+        assert "uncommitted changes" in detail
+        assert not (repo / "new.txt").exists()
 
 
 class TestMakeExecutorForwardsCodexConfig:

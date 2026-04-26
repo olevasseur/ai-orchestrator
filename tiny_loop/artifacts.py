@@ -136,7 +136,7 @@ def package_artifacts(
         step_type = itr.get("step_type", "implementation")
         if step_type in ("validation", "packaging"):
             itr_num = itr["iteration"]
-            output = itr.get("claude_output", "")
+            output = itr.get("executor_output") or itr.get("claude_output", "")
             if output:
                 name = f"{step_type}_iter_{itr_num}.txt"
                 _save(name, output)
