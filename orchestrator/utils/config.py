@@ -33,18 +33,27 @@ class Config:
     claude_cli_path: str = "claude"     # path to the `claude` binary
     codex_cli_path: str = "codex"       # path to the `codex` binary (experimental)
 
-    # Codex worktree isolation (experimental)
-    # codex_workspace_strategy: "inplace" runs Codex directly in the target repo
-    #   (current behaviour). "worktree" creates a disposable git worktree under
-    #   codex_worktree_base_dir and runs Codex there, isolating its filesystem
-    #   writes from the user's working tree.
-    codex_workspace_strategy: str = "inplace"          # "inplace" | "worktree"
-    codex_worktree_base_dir: str = "~/.orchestrator/codex-worktrees"
-    # codex_apply_policy controls what happens to the worktree after Codex runs:
-    #   "manual" — leave the worktree in place for the human to inspect/apply
+    # Executor workspace isolation (generic across providers).
+    # executor_workspace_strategy: "inplace" runs the executor directly in the
+    #   target repo (legacy behaviour). "worktree" creates a disposable git
+    #   worktree under executor_worktree_base_dir and runs the executor there,
+    #   isolating its filesystem writes from the user's working tree.
+    executor_workspace_strategy: str = "inplace"        # "inplace" | "worktree"
+    executor_worktree_base_dir: str = "/tmp/ai-orchestrator-executor-worktrees"
+    # executor_apply_policy controls what happens to the worktree after the
+    # executor runs:
+    #   "manual" — leave the diff for the human to inspect/apply
     #   "auto"   — apply the diff back to the source repo automatically
     #   "discard"— throw the worktree away once the run is captured
-    codex_apply_policy: str = "manual"                  # "manual" | "auto" | "discard"
+    executor_apply_policy: str = "manual"               # "manual" | "auto" | "discard"
+
+    # Legacy Codex-specific aliases. Kept as separate fields so existing
+    # config.yaml files and call sites that read `cfg.codex_*` keep working.
+    # Config.load() mirrors values between the generic and legacy forms when
+    # only one is provided.
+    codex_workspace_strategy: str = "inplace"
+    codex_worktree_base_dir: str = "/tmp/ai-orchestrator-executor-worktrees"
+    codex_apply_policy: str = "manual"
 
     # Storage
     log_dir: str = "~/.orchestrator/runs"
@@ -100,6 +109,20 @@ class Config:
             if isinstance(codex_block, dict) and "command" in codex_block \
                     and "codex_cli_path" not in raw:
                 raw["codex_cli_path"] = codex_block["command"]
+
+        # Mirror generic executor workspace fields with their legacy codex_*
+        # aliases. The generic form wins when both are present; otherwise
+        # whichever side is set populates the other so call sites reading
+        # either name see a consistent value.
+        for generic, legacy in (
+            ("executor_workspace_strategy", "codex_workspace_strategy"),
+            ("executor_worktree_base_dir", "codex_worktree_base_dir"),
+            ("executor_apply_policy", "codex_apply_policy"),
+        ):
+            if generic in raw:
+                raw.setdefault(legacy, raw[generic])
+            elif legacy in raw:
+                raw.setdefault(generic, raw[legacy])
 
         # 2. Override with environment variables for secrets
         cfg = cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})

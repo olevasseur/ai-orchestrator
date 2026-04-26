@@ -646,3 +646,269 @@ class TestMakeExecutorForwardsCodexConfig:
         e = make_executor("cli", provider="codex")
         assert isinstance(e, CodexExecutor)
         assert e.workspace_strategy == "inplace"
+
+
+# ---------------------------------------------------------------------------
+# Generic executor_* workspace config (provider-agnostic).
+#
+# These tests pin the behaviour that the previous iteration introduced:
+#   * the new generic kwargs configure the same Codex worktree machinery,
+#   * legacy codex_* kwargs still work as before,
+#   * when both are supplied, the generic form wins,
+#   * the default remains Claude + inplace.
+# ---------------------------------------------------------------------------
+
+
+class TestMakeExecutorForwardsGenericConfig:
+    def test_generic_kwargs_drive_codex_workspace(self, tmp_path: Path):
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="worktree",
+            executor_worktree_base_dir=str(tmp_path / "wt"),
+            executor_apply_policy="manual",
+        )
+        assert isinstance(e, CodexExecutor)
+        assert e.workspace_strategy == "worktree"
+        assert e.worktree_base_dir == str(tmp_path / "wt")
+        assert e.apply_policy == "manual"
+
+    def test_generic_kwargs_omitted_defaults_to_inplace(self):
+        # No kwargs at all: Codex still defaults to inplace, matching the
+        # legacy codex_* default. Preserves current behaviour.
+        e = make_executor("cli", provider="codex")
+        assert e.workspace_strategy == "inplace"
+
+    def test_generic_apply_policy_auto_propagates_to_executor(self, tmp_path: Path):
+        # The factory must not silently swallow apply_policy='auto'; the
+        # CodexExecutor itself is what raises NotImplementedError at run().
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="worktree",
+            executor_worktree_base_dir=str(tmp_path / "wt"),
+            executor_apply_policy="auto",
+        )
+        assert e.apply_policy == "auto"
+
+
+class TestMakeExecutorGenericPrecedenceOverLegacy:
+    """When both forms are supplied, the generic executor_* form wins."""
+
+    def test_strategy_precedence(self, tmp_path: Path):
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="worktree",
+            codex_workspace_strategy="inplace",
+            executor_worktree_base_dir=str(tmp_path / "generic"),
+            codex_worktree_base_dir=str(tmp_path / "legacy"),
+        )
+        assert e.workspace_strategy == "worktree"
+        assert e.worktree_base_dir == str(tmp_path / "generic")
+
+    def test_apply_policy_precedence(self):
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_apply_policy="discard",
+            codex_apply_policy="manual",
+        )
+        assert e.apply_policy == "discard"
+
+    def test_legacy_alone_still_honoured(self, tmp_path: Path):
+        # Back-compat: callers that still pass codex_* (no generic) get the
+        # same behaviour they got before this sprint.
+        e = make_executor(
+            "cli",
+            provider="codex",
+            codex_workspace_strategy="worktree",
+            codex_worktree_base_dir=str(tmp_path / "legacy"),
+            codex_apply_policy="manual",
+        )
+        assert e.workspace_strategy == "worktree"
+        assert e.worktree_base_dir == str(tmp_path / "legacy")
+        assert e.apply_policy == "manual"
+
+    def test_generic_alone_overrides_legacy_default(self, tmp_path: Path):
+        # Generic kwargs alone (no codex_* passed) must reach CodexExecutor
+        # without falling back to the legacy default.
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="worktree",
+            executor_worktree_base_dir=str(tmp_path / "generic-only"),
+        )
+        assert e.workspace_strategy == "worktree"
+        assert e.worktree_base_dir == str(tmp_path / "generic-only")
+
+
+class TestConfigGenericPrecedenceOverLegacy:
+    """Config.load() mirrors generic <-> legacy fields. The generic form
+    wins when both are written; otherwise whichever side is set populates
+    the other so call sites reading either name see a consistent value."""
+
+    def test_default_config_is_inplace_for_both_aliases(self):
+        cfg = Config()
+        assert cfg.executor_workspace_strategy == "inplace"
+        assert cfg.codex_workspace_strategy == "inplace"
+        assert cfg.executor_apply_policy == "manual"
+        assert cfg.codex_apply_policy == "manual"
+
+    def test_generic_only_yaml_populates_legacy_alias(self, tmp_path: Path):
+        p = tmp_path / "config.yaml"
+        p.write_text(
+            "executor_workspace_strategy: worktree\n"
+            "executor_worktree_base_dir: /tmp/from-generic\n"
+            "executor_apply_policy: discard\n"
+        )
+        cfg = Config.load(p)
+        assert cfg.executor_workspace_strategy == "worktree"
+        assert cfg.codex_workspace_strategy == "worktree"
+        assert cfg.executor_worktree_base_dir == "/tmp/from-generic"
+        assert cfg.codex_worktree_base_dir == "/tmp/from-generic"
+        assert cfg.executor_apply_policy == "discard"
+        assert cfg.codex_apply_policy == "discard"
+
+    def test_legacy_only_yaml_populates_generic_alias(self, tmp_path: Path):
+        # Pre-existing config files using the codex_* keys must keep working
+        # without edits, AND must surface through the generic field names so
+        # the new make_executor wiring picks them up.
+        p = tmp_path / "config.yaml"
+        p.write_text(
+            "codex_workspace_strategy: worktree\n"
+            "codex_worktree_base_dir: /tmp/from-legacy\n"
+            "codex_apply_policy: manual\n"
+        )
+        cfg = Config.load(p)
+        assert cfg.executor_workspace_strategy == "worktree"
+        assert cfg.executor_worktree_base_dir == "/tmp/from-legacy"
+        assert cfg.executor_apply_policy == "manual"
+
+    def test_both_set_generic_wins(self, tmp_path: Path):
+        p = tmp_path / "config.yaml"
+        p.write_text(
+            "executor_workspace_strategy: worktree\n"
+            "codex_workspace_strategy: inplace\n"
+            "executor_apply_policy: discard\n"
+            "codex_apply_policy: manual\n"
+        )
+        cfg = Config.load(p)
+        # Generic wins on its own field; legacy field keeps whatever the
+        # YAML explicitly wrote so existing readers aren't surprised.
+        assert cfg.executor_workspace_strategy == "worktree"
+        assert cfg.executor_apply_policy == "discard"
+
+
+class TestProviderMatrix:
+    """Provider behaviour matrix per sprint goal:
+       * Claude + inplace   - default, unchanged
+       * Codex  + inplace   - direct Codex
+       * Codex  + worktree  - isolated Codex via generic config
+       * Claude + worktree  - currently a soft no-op (still returns the
+         in-place CLIExecutor); tested so a future sprint that switches to
+         either real worktree support or an explicit unsupported error has
+         to update this test deliberately."""
+
+    def test_default_claude_inplace_returns_cli_executor(self):
+        # Default Config + default make_executor must still mean Claude/CLI.
+        cfg = Config()
+        assert cfg.executor_provider == "claude"
+        assert cfg.executor_workspace_strategy == "inplace"
+        e = make_executor(
+            "cli",
+            cfg.claude_cli_path,
+            provider=cfg.executor_provider,
+            executor_workspace_strategy=cfg.executor_workspace_strategy,
+            executor_worktree_base_dir=cfg.executor_worktree_base_dir,
+            executor_apply_policy=cfg.executor_apply_policy,
+        )
+        assert isinstance(e, CLIExecutor)
+
+    def test_codex_inplace_via_generic_config(self):
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="inplace",
+        )
+        assert isinstance(e, CodexExecutor)
+        assert e.workspace_strategy == "inplace"
+
+    def test_codex_worktree_via_generic_config_runs_end_to_end(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # End-to-end: generic kwargs alone drive a real Codex worktree run
+        # that captures a diff, cleans up the worktree, and leaves the
+        # source repo untouched. The worktree must land under the generic
+        # base dir, NOT inside the source repo or any artifact directory.
+        src = tmp_path / "src"
+        src.mkdir()
+        _init_repo(src)
+        base = tmp_path / "executor-wt-base"
+
+        def fake_edits(cwd: Path):
+            (cwd / "hello.txt").write_text("modified via generic config\n")
+            (cwd / "added.txt").write_text("brand new\n")
+
+        _patch_codex_popen(monkeypatch, edits=fake_edits)
+        e = make_executor(
+            "cli",
+            provider="codex",
+            executor_workspace_strategy="worktree",
+            executor_worktree_base_dir=str(base),
+            executor_apply_policy="manual",
+        )
+        res = e.run(prompt="x", repo_path=str(src))
+
+        assert "hello.txt" in res.diff
+        assert "added.txt" in res.diff
+        assert res.workspace_path.startswith(str(base.resolve()))
+        assert not Path(res.workspace_path).exists(), "worktree leaked"
+
+        status = _real_subprocess.run(
+            ["git", "-C", str(src), "status", "--porcelain"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert status == ""
+        assert (src / "hello.txt").read_text() == "original\n"
+        assert not (src / "added.txt").exists()
+
+    def test_claude_with_worktree_config_raises_unsupported(
+        self, tmp_path: Path
+    ):
+        # Claude + worktree is intentionally NOT implemented in this sprint.
+        # Decision: fail loud (ValueError) rather than silently fall back to
+        # in-place — operators who flip executor_workspace_strategy at the
+        # Config level expect it to apply to whichever provider is selected.
+        with pytest.raises(ValueError, match="worktree.*not supported.*claude"):
+            make_executor(
+                "cli",
+                provider="claude",
+                executor_workspace_strategy="worktree",
+                executor_worktree_base_dir=str(tmp_path / "wt"),
+                executor_apply_policy="manual",
+            )
+
+    def test_claude_with_legacy_codex_worktree_kwargs_also_raises(
+        self, tmp_path: Path
+    ):
+        # The same guardrail must trip for the legacy alias, since Config
+        # mirrors the two and an operator could plausibly leave a stale
+        # codex_workspace_strategy: worktree behind after switching providers.
+        with pytest.raises(ValueError, match="worktree.*not supported.*claude"):
+            make_executor(
+                "cli",
+                provider="claude",
+                codex_workspace_strategy="worktree",
+                codex_worktree_base_dir=str(tmp_path / "wt"),
+            )
+
+    def test_claude_inplace_still_works_when_kwargs_explicit(self):
+        # Explicitly setting inplace must still build a CLIExecutor — the
+        # guardrail above must only fire for worktree.
+        e = make_executor(
+            "cli",
+            provider="claude",
+            executor_workspace_strategy="inplace",
+        )
+        assert isinstance(e, CLIExecutor)

@@ -191,17 +191,49 @@ no per-action prompt. Treat it like running untrusted code as your user.
 Session resumption is not yet implemented for Codex; passing
 `resume_session_id` to `CodexExecutor.run()` raises `NotImplementedError`.
 
-### Codex worktree isolation (recommended default)
+### Workspace strategy (provider-agnostic)
 
-Because the Codex CLI bypasses approvals and sandboxing, the orchestrator
-ships a workspace-isolation mode that is enabled by default in `config.yaml`.
-With `codex_workspace_strategy: worktree`, every Codex iteration:
+The orchestrator supports an optional **workspace isolation** mode that runs
+the executor inside a disposable git worktree, captures the resulting
+unified diff, and leaves the source repo untouched until a human applies the
+patch by hand. The settings are provider-agnostic — they live under the
+`executor_*` namespace and apply to any provider whose adapter supports
+worktree mode (today, only Codex).
 
-1. Creates a **detached git worktree** under `codex_worktree_base_dir`
-   (default `/tmp/ai-orchestrator-codex-worktrees`) from the source repo's
-   current `HEAD`.
-2. Runs `codex exec` with the worktree as `cwd` — the source repo is never
-   the working directory.
+```yaml
+# config.yaml
+executor_provider: claude                         # claude | codex
+executor_workspace_strategy: inplace              # inplace | worktree
+executor_worktree_base_dir: /tmp/ai-orchestrator-executor-worktrees
+executor_apply_policy: manual                     # manual | discard  (auto: not implemented)
+```
+
+**Why worktree mode exists.** The Codex CLI runs with
+`--dangerously-bypass-approvals-and-sandbox`, which lets it execute
+arbitrary shell commands without per-action approval. Worktree mode confines
+those writes to a throwaway git worktree so the source repo can't be
+modified accidentally, and produces a reviewable diff artifact instead of
+in-place mutations.
+
+**Worktree mode is opt-in.** The default (`inplace`) preserves the prior
+behaviour for both providers — Claude continues to run in the target repo
+exactly as before. Switching strategies is a config-level decision, not a
+provider-level one.
+
+#### Provider support matrix
+
+| Provider | `inplace` | `worktree` |
+|---|---|---|
+| `claude` (default) | ✅ Stable — runs `claude --print` in the target repo. | ❌ Not yet supported. `make_executor` raises `ValueError` so the misconfiguration is visible at startup. |
+| `codex` | ✅ Direct mode — Codex runs in the target repo. Use only when the repo is itself disposable. | ✅ Codex runs in a detached worktree under `executor_worktree_base_dir`; the diff is persisted as an artifact and the worktree is removed afterwards. |
+| Future providers | Same model — adapters opt into worktree by accepting the workspace kwargs. | Same model. |
+
+#### What `worktree` does, step by step (Codex today)
+
+1. Creates a **detached git worktree** under `executor_worktree_base_dir`
+   from the source repo's current `HEAD`.
+2. Runs the executor (`codex exec`) with the worktree as `cwd` — the source
+   repo is never the working directory.
 3. Captures the unified diff (including new and deleted files) by staging
    everything in the worktree and running `git diff --cached HEAD`.
 4. Persists the diff as `iterations/<n>/codex_workspace.diff` and the
@@ -210,31 +242,32 @@ With `codex_workspace_strategy: worktree`, every Codex iteration:
 6. Surfaces the patch to the human reviewer with the exact apply command:
    `git -C <repo> apply <path/to/codex_workspace.diff>`.
 
-```yaml
-# config.yaml
-executor_provider: codex
-codex_workspace_strategy: worktree              # worktree | inplace
-codex_worktree_base_dir: /tmp/ai-orchestrator-codex-worktrees
-codex_apply_policy: manual                      # manual | discard  (auto: not implemented)
-```
+#### Safety guarantees
 
-**Safety guarantees**
-
-- The source repo's `HEAD` and working tree are unchanged after a Codex
+- The source repo's `HEAD` and working tree are unchanged after a worktree
   iteration; nothing is auto-applied.
-- All worktrees land under `codex_worktree_base_dir` — never inside the
+- All worktrees land under `executor_worktree_base_dir` — never inside the
   source repo, the user's home, `~/.orchestrator/runs/`, or any other
   artifact directory. `tests/test_executor_provider.py::TestCodexWorktreeMode`
-  verifies this.
-- Cleanup runs in a `finally` block, so a Codex crash or timeout still
-  removes the worktree (the path stays on `ExecutionResult.workspace_path`
-  for forensics).
-- `codex_apply_policy: auto` is intentionally rejected with
+  and `TestProviderMatrix` verify this.
+- Cleanup runs in a `finally` block, so a crash or timeout still removes the
+  worktree (the path stays on `ExecutionResult.workspace_path` for forensics).
+- `executor_apply_policy: auto` is intentionally rejected with
   `NotImplementedError` — automatic apply is out of scope for this sprint.
 
-**`inplace` mode** remains available for experiments where the target repo is
-itself disposable, but is no longer the default. Claude (`executor_provider:
-claude`) is unaffected by any of these knobs.
+#### Backward compatibility with legacy `codex_*` keys
+
+Pre-existing config files that use the older Codex-specific names keep
+working without edits:
+
+- `codex_workspace_strategy` → `executor_workspace_strategy`
+- `codex_worktree_base_dir`  → `executor_worktree_base_dir`
+- `codex_apply_policy`       → `executor_apply_policy`
+
+`Config.load()` mirrors the two forms: setting only the legacy key
+populates the generic field, and vice versa. **When both forms are written,
+the generic `executor_*` form wins.** New configurations should prefer the
+generic names.
 
 ### Smoke-testing real Codex
 

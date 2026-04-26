@@ -37,7 +37,7 @@ APPLY_DISCARD = "discard"
 APPLY_AUTO = "auto"
 _VALID_APPLY_POLICIES = {APPLY_MANUAL, APPLY_DISCARD, APPLY_AUTO}
 
-DEFAULT_CODEX_WORKTREE_BASE_DIR = "/tmp/ai-orchestrator-codex-worktrees"
+DEFAULT_CODEX_WORKTREE_BASE_DIR = "/tmp/ai-orchestrator-executor-worktrees"
 
 
 class CLIExecutor(BaseExecutor):
@@ -230,7 +230,7 @@ class CodexExecutor(BaseExecutor):
             )
         if self.apply_policy == APPLY_AUTO:
             raise NotImplementedError(
-                "codex_apply_policy='auto' is not implemented yet; "
+                "executor_apply_policy='auto' is not implemented yet; "
                 "use 'manual' (review diff artifact and apply by hand) or 'discard'."
             )
 
@@ -494,32 +494,75 @@ def make_executor(
     *,
     provider: str = "claude",
     codex_cli_path: str = "codex",
-    codex_workspace_strategy: str = WORKSPACE_INPLACE,
-    codex_worktree_base_dir: str = DEFAULT_CODEX_WORKTREE_BASE_DIR,
-    codex_apply_policy: str = APPLY_MANUAL,
+    # Generic workspace-isolation settings (preferred). These apply to any
+    # provider whose adapter supports worktree mode; today that is only Codex.
+    executor_workspace_strategy: str | None = None,
+    executor_worktree_base_dir: str | None = None,
+    executor_apply_policy: str | None = None,
+    # Legacy Codex-specific aliases. Kept so existing callers and tests that
+    # pass `codex_*` keep working. When both forms are supplied, the generic
+    # `executor_*` form wins.
+    codex_workspace_strategy: str | None = None,
+    codex_worktree_base_dir: str | None = None,
+    codex_apply_policy: str | None = None,
 ) -> BaseExecutor:
     """Factory: return the right executor for the configured mode and provider.
 
     `mode` selects the execution surface (cli vs demo). `provider` selects
     which agent adapter to build for cli mode. Demo mode ignores provider.
 
-    The `codex_*` kwargs configure CodexExecutor's workspace isolation. They
-    are ignored when `provider != "codex"`, so call sites can pass them
-    unconditionally from Config.
+    The `executor_*` kwargs configure workspace isolation for providers that
+    support it (currently CodexExecutor). They are ignored when the chosen
+    provider does not support worktree mode, so call sites can pass them
+    unconditionally from Config. The legacy `codex_*` kwargs are still
+    accepted for backward compatibility but the generic form wins when both
+    are provided.
     """
+    workspace_strategy = _coalesce(
+        executor_workspace_strategy, codex_workspace_strategy, WORKSPACE_INPLACE,
+    )
+    worktree_base_dir = _coalesce(
+        executor_worktree_base_dir,
+        codex_worktree_base_dir,
+        DEFAULT_CODEX_WORKTREE_BASE_DIR,
+    )
+    apply_policy = _coalesce(
+        executor_apply_policy, codex_apply_policy, APPLY_MANUAL,
+    )
+
     if mode == "demo":
         return DemoExecutor()
     if mode == "cli":
         if provider == "claude":
+            if workspace_strategy == WORKSPACE_WORKTREE:
+                # Claude + worktree is not implemented yet (Claude's session
+                # model and validation flow need their own design). Fail loud
+                # rather than silently running in-place — operators who flip
+                # executor_workspace_strategy at the Config level expect it
+                # to apply to whichever provider is selected.
+                raise ValueError(
+                    "executor_workspace_strategy='worktree' is not supported "
+                    "for executor_provider='claude' yet. Either switch to "
+                    "executor_provider='codex' or set "
+                    "executor_workspace_strategy='inplace'."
+                )
             return CLIExecutor(claude_cli_path=claude_cli_path)
         if provider == "codex":
             return CodexExecutor(
                 codex_cli_path=codex_cli_path,
-                workspace_strategy=codex_workspace_strategy,
-                worktree_base_dir=codex_worktree_base_dir,
-                apply_policy=codex_apply_policy,
+                workspace_strategy=workspace_strategy,
+                worktree_base_dir=worktree_base_dir,
+                apply_policy=apply_policy,
             )
         raise ValueError(
             f"Unknown executor provider: {provider!r}. Use 'claude' or 'codex'."
         )
     raise ValueError(f"Unknown executor mode: {mode!r}. Use 'cli' or 'demo'.")
+
+
+def _coalesce(*values):
+    """Return the first non-None argument; the last value is the default."""
+    for v in values[:-1]:
+        if v is not None:
+            return v
+    return values[-1]
