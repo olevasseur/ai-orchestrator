@@ -199,6 +199,12 @@ def run(
     )
     state["executor_apply_policy"] = executor.apply_policy
     state["executor_timeout"] = executor.timeout
+    state["audit_worktrees_after_run"] = getattr(
+        executor, "audit_worktrees_after_run", True
+    )
+    state["auto_remove_clean_merged_worktrees"] = (
+        getattr(executor, "auto_remove_clean_merged_worktrees", False)
+    )
     save_state(state, state_path)
 
     print(f"Run {run_id} started — max {max_iterations} iterations")

@@ -22,6 +22,8 @@ class TinyLoopExecutor:
     apply_policy: str
     timeout: int
     executor: BaseExecutor
+    audit_worktrees_after_run: bool = True
+    auto_remove_clean_merged_worktrees: bool = False
 
     @property
     def display_name(self) -> str:
@@ -73,6 +75,8 @@ def build_tiny_loop_executor(timeout_override: int | None = None) -> TinyLoopExe
         apply_policy=cfg.executor_apply_policy,
         timeout=timeout,
         executor=executor,
+        audit_worktrees_after_run=cfg.audit_worktrees_after_run,
+        auto_remove_clean_merged_worktrees=cfg.auto_remove_clean_merged_worktrees,
     )
 
 

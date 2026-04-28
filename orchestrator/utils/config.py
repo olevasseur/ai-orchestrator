@@ -46,6 +46,11 @@ class Config:
     #   "auto"   — apply the diff back to the source repo automatically
     #   "discard"— throw the worktree away once the run is captured
     executor_apply_policy: str = "manual"               # "manual" | "auto" | "discard"
+    # Post-run worktree cleanup audit. The audit writes a recommendation
+    # artifact for successful worktree-strategy tiny_loop runs. Auto-remove is
+    # intentionally disabled by default and is not performed by the audit.
+    audit_worktrees_after_run: bool = True
+    auto_remove_clean_merged_worktrees: bool = False
 
     # Legacy Codex-specific aliases. Kept as separate fields so existing
     # config.yaml files and call sites that read `cfg.codex_*` keep working.

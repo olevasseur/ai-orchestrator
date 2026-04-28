@@ -13,6 +13,7 @@ Harness-owned packaging artifacts:
 from __future__ import annotations
 
 import subprocess
+import shlex
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,248 @@ def _git_changed_files(repo: str, start_commit: str) -> dict[str, list[str]]:
         "uncommitted": uncommitted,
         "untracked": untracked,
     }
+
+
+def _git_run(
+    repo: str | Path,
+    args: list[str],
+    *,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _git_text(repo: str | Path, args: list[str]) -> str:
+    result = _git_run(repo, args)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _parse_worktree_porcelain(output: str) -> list[dict[str, str]]:
+    worktrees: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current:
+                worktrees.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree" and current:
+            worktrees.append(current)
+            current = {}
+        current[key] = value
+    if current:
+        worktrees.append(current)
+    return worktrees
+
+
+def _branch_name(worktree: dict[str, str], path: str) -> str:
+    branch = _git_text(path, ["branch", "--show-current"])
+    if branch:
+        return branch
+    porcelain_branch = worktree.get("branch", "")
+    if porcelain_branch.startswith("refs/heads/"):
+        return porcelain_branch.removeprefix("refs/heads/")
+    return porcelain_branch or "(detached)"
+
+
+def _is_ancestor(repo: str | Path, ancestor: str, descendant: str) -> bool | None:
+    result = _git_run(repo, ["merge-base", "--is-ancestor", ancestor, descendant])
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _format_bool(value: bool | None) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
+
+
+def _is_success_status(status: object) -> bool:
+    return str(status) in {"success", "stop_success"}
+
+
+def _md_cell(value: object) -> str:
+    text = str(value) if value is not None else ""
+    return text.replace("|", "\\|").replace("\n", " ").strip() or "-"
+
+
+def audit_worktree_cleanup(repo: str | Path) -> str:
+    """Return a markdown cleanup recommendation for git worktrees.
+
+    This audit is read-only. It never removes worktrees, deletes branches, or
+    fetches from remotes. ``origin/main`` checks use the local remote-tracking
+    ref if it exists.
+    """
+
+    repo_path = str(Path(repo).resolve())
+    main_head = _git_text(repo_path, ["rev-parse", "--short", "main"])
+    main_ref_available = bool(main_head)
+    origin_main_head = _git_text(repo_path, ["rev-parse", "--short", "origin/main"])
+    origin_main_available = bool(origin_main_head)
+    worktree_result = _git_run(repo_path, ["worktree", "list", "--porcelain"])
+
+    lines = [
+        "# Worktree Cleanup Recommendation",
+        "",
+        f"- Target repo: `{repo_path}`",
+        f"- Local main HEAD: `{main_head or 'unavailable'}`",
+        f"- Local origin/main HEAD: `{origin_main_head or 'unavailable'}`",
+        "- Network fetch performed: no",
+        "- Removal performed: no",
+        "- Branch deletion performed: no",
+        "",
+    ]
+
+    if worktree_result.returncode != 0:
+        lines.extend(
+            [
+                "## Audit Error",
+                "",
+                "Could not list git worktrees.",
+                "",
+                "```text",
+                (worktree_result.stderr or worktree_result.stdout).strip(),
+                "```",
+                "",
+                "No cleanup recommendation could be produced.",
+            ]
+        )
+        return "\n".join(lines).rstrip() + "\n"
+
+    worktrees = _parse_worktree_porcelain(worktree_result.stdout)
+    rows: list[dict[str, object]] = []
+    for worktree in worktrees:
+        path = worktree.get("worktree", "")
+        if not path:
+            continue
+        is_primary_checkout = Path(path).resolve() == Path(repo_path).resolve()
+        head = _git_text(path, ["rev-parse", "--short", "HEAD"]) or worktree.get(
+            "HEAD", "unknown"
+        )[:12]
+        branch = _branch_name(worktree, path)
+        status_lines = _git_text(path, ["status", "--short"]).splitlines()
+        untracked = [line for line in status_lines if line.startswith("??")]
+        clean = len(status_lines) == 0
+        merged_main = (
+            _is_ancestor(path, "HEAD", "main") if main_ref_available else None
+        )
+        merged_origin_main = (
+            _is_ancestor(path, "HEAD", "origin/main")
+            if origin_main_available
+            else None
+        )
+        safe_to_remove = (
+            not is_primary_checkout
+            and clean
+            and not untracked
+            and merged_main is True
+        )
+        reason_parts: list[str] = []
+        if is_primary_checkout:
+            reason_parts.append("primary checkout")
+        if not clean:
+            reason_parts.append("dirty working tree")
+        if untracked:
+            reason_parts.append("has untracked files")
+        if merged_main is not True:
+            reason_parts.append("not confirmed merged into main")
+        if not reason_parts:
+            reason_parts.append("clean and merged into main")
+
+        rows.append(
+            {
+                "path": path,
+                "branch": branch,
+                "head": head,
+                "status": "\\n".join(status_lines) if status_lines else "clean",
+                "has_untracked": bool(untracked),
+                "merged_main": merged_main,
+                "merged_origin_main": merged_origin_main,
+                "safe_to_remove": safe_to_remove,
+                "reason": "; ".join(reason_parts),
+                "remove_command": (
+                    f"git -C {shlex.quote(repo_path)} worktree remove "
+                    f"{shlex.quote(path)}"
+                ),
+            }
+        )
+
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Worktree | Branch | HEAD | Status | Untracked | Merged into main | Merged into origin/main | Safe to remove |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for row in rows:
+        lines.append(
+            "| {path} | {branch} | {head} | {status} | {untracked} | {merged_main} | {merged_origin_main} | {safe} |".format(
+                path=_md_cell(row["path"]),
+                branch=_md_cell(row["branch"]),
+                head=_md_cell(row["head"]),
+                status=_md_cell(row["status"]),
+                untracked="yes" if row["has_untracked"] else "no",
+                merged_main=_format_bool(row["merged_main"]),
+                merged_origin_main=_format_bool(row["merged_origin_main"]),
+                safe="yes" if row["safe_to_remove"] else "no",
+            )
+        )
+
+    lines.extend(["", "## Details", ""])
+    for row in rows:
+        lines.extend(
+            [
+                f"### `{row['path']}`",
+                "",
+                f"- Branch: `{row['branch']}`",
+                f"- HEAD: `{row['head']}`",
+                f"- Git status summary: `{row['status']}`",
+                f"- Branch merged into main: {_format_bool(row['merged_main'])}",
+                (
+                    "- Branch appears merged into origin/main: "
+                    f"{_format_bool(row['merged_origin_main'])}"
+                ),
+                f"- Safe to remove: {'yes' if row['safe_to_remove'] else 'no'}",
+                f"- Reason: {row['reason']}",
+            ]
+        )
+        if row["safe_to_remove"]:
+            lines.extend(
+                [
+                    "- Exact removal command:",
+                    "",
+                    "```bash",
+                    str(row["remove_command"]),
+                    "```",
+                ]
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Safety Note",
+            "",
+            "This is an audit-only artifact. No worktrees were removed, no branches were deleted, and no remote fetch was performed.",
+            "If `origin/main` is stale, the origin/main result may be stale too; fetch explicitly before relying on remote-tracking status.",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def generate_diff_stat(repo: str, out: Path, start_commit: str) -> Path:
@@ -210,7 +453,21 @@ def package_artifacts(
     else:
         _log("summary.md absent — skipped repo-state append")
 
-    # ── 5. packaging_log.txt ─────────────────────────────────────────
+    # ── 5. Worktree cleanup recommendation ───────────────────────────
+    if (
+        _is_success_status(state.get("status"))
+        and state.get("executor_workspace_strategy") == "worktree"
+        and state.get("audit_worktrees_after_run", True)
+    ):
+        _save("worktree_cleanup_recommendation.md", audit_worktree_cleanup(repo))
+        _log("Generated worktree_cleanup_recommendation.md")
+        if state.get("auto_remove_clean_merged_worktrees"):
+            _log(
+                "auto_remove_clean_merged_worktrees is set, but automatic "
+                "removal is not implemented; audit-only recommendation written"
+            )
+
+    # ── 6. packaging_log.txt ─────────────────────────────────────────
     _log("Packaging complete")
     _save("packaging_log.txt", "\n".join(log_lines) + "\n")
 

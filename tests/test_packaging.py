@@ -14,6 +14,7 @@ from tiny_loop.artifacts import (
     _git_changed_files,
     _git_diff_stat,
     archive_run_dir,
+    audit_worktree_cleanup,
     generate_diff_stat,
     package_artifacts,
     update_summary_repo_state,
@@ -328,6 +329,150 @@ class TestManifestCategories:
         assert "Repo changes (" not in manifest
 
 
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def worktree_audit_repo(tmp_path):
+    repo = tmp_path / "repo"
+    worktrees = tmp_path / "worktrees"
+    repo.mkdir()
+    worktrees.mkdir()
+
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "tester")
+    _git(repo, "config", "commit.gpgsign", "false")
+    (repo / "README.md").write_text("hello\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "initial")
+
+    safe = worktrees / "safe"
+    dirty = worktrees / "dirty"
+    untracked = worktrees / "untracked"
+    unmerged = worktrees / "unmerged"
+
+    _git(repo, "branch", "safe")
+    _git(repo, "branch", "dirty")
+    _git(repo, "branch", "untracked")
+    _git(repo, "branch", "unmerged")
+
+    _git(repo, "worktree", "add", "-q", str(safe), "safe")
+    _git(repo, "worktree", "add", "-q", str(dirty), "dirty")
+    _git(repo, "worktree", "add", "-q", str(untracked), "untracked")
+    _git(repo, "worktree", "add", "-q", str(unmerged), "unmerged")
+
+    (dirty / "README.md").write_text("dirty\n")
+    (untracked / "scratch.txt").write_text("scratch\n")
+    (unmerged / "feature.txt").write_text("feature\n")
+    _git(unmerged, "add", "feature.txt")
+    _git(unmerged, "commit", "-q", "-m", "unmerged feature")
+
+    return {
+        "repo": repo,
+        "safe": safe,
+        "dirty": dirty,
+        "untracked": untracked,
+        "unmerged": unmerged,
+    }
+
+
+class TestWorktreeCleanupAudit:
+    def test_clean_merged_worktree_is_reported_safe_to_remove(
+        self, worktree_audit_repo
+    ):
+        report = audit_worktree_cleanup(worktree_audit_repo["repo"])
+
+        assert f"### `{worktree_audit_repo['safe']}`" in report
+        assert "| {path} | safe |".format(path=worktree_audit_repo["safe"]) in report
+        assert f"`{worktree_audit_repo['safe']}`" in report
+        assert "Safe to remove: yes" in report
+
+    def test_primary_checkout_is_not_reported_safe_to_remove(
+        self, worktree_audit_repo
+    ):
+        repo = worktree_audit_repo["repo"]
+        report = audit_worktree_cleanup(repo)
+
+        section = report.split(f"### `{repo.resolve()}`", 1)[1].split("### `", 1)[0]
+        assert "Safe to remove: no" in section
+        assert "primary checkout" in section
+        assert f"git -C {repo.resolve()} worktree remove {repo.resolve()}" not in section
+
+    def test_dirty_worktree_is_not_safe(self, worktree_audit_repo):
+        report = audit_worktree_cleanup(worktree_audit_repo["repo"])
+
+        section = report.split(f"### `{worktree_audit_repo['dirty']}`", 1)[1].split(
+            "### `", 1
+        )[0]
+        assert "Safe to remove: no" in section
+        assert "dirty working tree" in section
+
+    def test_untracked_files_make_worktree_not_safe(self, worktree_audit_repo):
+        report = audit_worktree_cleanup(worktree_audit_repo["repo"])
+
+        section = report.split(
+            f"### `{worktree_audit_repo['untracked']}`", 1
+        )[1].split("### `", 1)[0]
+        assert "Safe to remove: no" in section
+        assert "has untracked files" in section
+        assert "?? scratch.txt" in section
+
+    def test_unmerged_branch_is_not_safe(self, worktree_audit_repo):
+        report = audit_worktree_cleanup(worktree_audit_repo["repo"])
+
+        section = report.split(
+            f"### `{worktree_audit_repo['unmerged']}`", 1
+        )[1].split("### `", 1)[0]
+        assert "Safe to remove: no" in section
+        assert "Branch merged into main: no" in section
+        assert "not confirmed merged into main" in section
+
+    def test_artifact_includes_exact_remove_command_for_safe_worktree(
+        self, worktree_audit_repo
+    ):
+        repo = worktree_audit_repo["repo"]
+        safe = worktree_audit_repo["safe"]
+
+        report = audit_worktree_cleanup(repo)
+
+        assert f"git -C {repo.resolve()} worktree remove {safe}" in report
+
+    def test_audit_does_not_perform_deletion(self, worktree_audit_repo):
+        audit_worktree_cleanup(worktree_audit_repo["repo"])
+
+        assert worktree_audit_repo["safe"].exists()
+        assert worktree_audit_repo["dirty"].exists()
+        assert worktree_audit_repo["untracked"].exists()
+        assert worktree_audit_repo["unmerged"].exists()
+
+    def test_package_artifacts_writes_cleanup_recommendation_for_worktree_runs(
+        self, tmp_path, base_state, worktree_audit_repo
+    ):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "state.json").write_text("{}")
+        (out / "summary.md").write_text("# S")
+        base_state["status"] = "stop_success"
+        base_state["executor_workspace_strategy"] = "worktree"
+        base_state["audit_worktrees_after_run"] = True
+
+        created = package_artifacts(str(worktree_audit_repo["repo"]), out, "", base_state)
+
+        names = {Path(p).name for p in created}
+        assert "worktree_cleanup_recommendation.md" in names
+        report = (out / "worktree_cleanup_recommendation.md").read_text()
+        assert "Removal performed: no" in report
+
+
 class TestUpdateSummaryRepoState:
     """Direct tests for the summary-append helper."""
 
@@ -615,4 +760,3 @@ class TestArchiveRunDir:
         # Lower threshold → archive created.
         archive = archive_run_dir(tmp_path, threshold=2)
         assert archive is not None and archive.exists()
-
