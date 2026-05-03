@@ -36,6 +36,53 @@ Typical command:
 .venv/bin/python -m tiny_loop --repo <target-repo> --objective-file <prompt-file> --max-iterations 5
 ```
 
+## APE Sprint Execution-Mode Rule
+
+When the user asks for an APE sprint, APE implementation task, APE validation
+task, or work targeting `/Users/aiagent/repos/ape`, you must confirm the
+execution mode before doing implementation work.
+
+If you are running from:
+
+```text
+/Users/aiagent/repos/ai-orchestrator
+```
+
+then default to using `tiny_loop`.
+
+Before starting, explicitly state one of:
+
+- Mode A: tiny_loop orchestrated run
+- Mode B: direct Codex implementation
+
+Mode A is the default for APE sprint work.
+
+Do not silently bypass `tiny_loop`.
+
+Fresh APE worktrees do not imply direct execution. `tiny_loop` can target a
+fresh worktree.
+
+Mode B is allowed only if:
+
+- the user explicitly requests direct execution, or
+- `tiny_loop` is unavailable/broken and you explain why, or
+- you ask for and receive confirmation before proceeding.
+
+If using Mode A, create normal `tiny_loop` artifacts and summaries.
+
+If using Mode B, still create a handoff package with:
+
+- `summary.md`
+- `diff_stat.txt`
+- `changed_files.txt`
+- `validation.txt`
+- `artifact_manifest.txt`
+- `final_review_notes.md`
+
+For APE work, always confirm the target repo/worktree path before running
+commands. Do not accidentally run APE implementation work in
+`/Users/aiagent/repos/ai-orchestrator`.
+
 ## Reporting
 
 At handoff, summarize changed files, exact tests or checks run, and remaining
